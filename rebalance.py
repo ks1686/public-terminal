@@ -59,6 +59,11 @@ SGOV_SYMBOL     = "SGOV"
 BTC_SYMBOL      = "BTC"
 ETH_SYMBOL      = "ETH"
 NON_STOCK_ETFS  = {GOLD_SYMBOL, SGOV_SYMBOL}  # equity symbols excluded from the S&P 500 slice
+BROKER_TO_YF_SYMBOLS = {
+    "BF.B": "BF-B",
+    "BRK.B": "BRK-B",
+}
+YF_TO_BROKER_SYMBOLS = {yf_symbol: broker_symbol for broker_symbol, yf_symbol in BROKER_TO_YF_SYMBOLS.items()}
 
 # ---------------------------------------------------------------------------
 # Operational config
@@ -76,6 +81,9 @@ MARKET_CAP_FETCH_WORKERS       = 20   # parallel threads for fast_info calls
 MIN_ORDER_DOLLARS         = Decimal("1.00")   # ignore equity orders smaller than $1
 MIN_CRYPTO_ORDER_DOLLARS  = Decimal("1.00")   # minimum notional for any crypto order
 REBALANCE_THRESHOLD_PCT   = Decimal("0.005")  # only act if drift > 0.5% of target
+BUYING_POWER_BUFFER       = Decimal("1.00")   # leave a small cushion to avoid broker-side shortfall errors
+SELL_WAIT_TIMEOUT_SECONDS = 300               # wait up to 5 minutes for sell orders to clear
+ORDER_STATUS_POLL_SECONDS = 2.0
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -109,7 +117,7 @@ def fetch_sp500_tickers() -> list[str]:
     with urllib.request.urlopen(req) as resp:
         html = resp.read().decode("utf-8")
     tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
-    tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
+    tickers = tables[0]["Symbol"].tolist()
     log.info("  → %d constituents", len(tickers))
     return tickers
 
@@ -129,7 +137,11 @@ def _load_market_cap_cache() -> dict[str, float] | None:
             return None
         log.info("Using cached market caps (%d entries, %.0f min old).",
                  len(data["caps"]), age.total_seconds() / 60)
-        return data["caps"]
+        # Older caches stored yfinance-style share-class tickers (e.g. BRK-B).
+        return {
+            YF_TO_BROKER_SYMBOLS.get(symbol, symbol): cap
+            for symbol, cap in data["caps"].items()
+        }
     except Exception as exc:
         log.warning("Could not read market cap cache: %s", exc)
         return None
@@ -144,7 +156,8 @@ def _save_market_cap_cache(caps: dict[str, float]) -> None:
 
 def _fetch_one_market_cap(ticker: str) -> tuple[str, float | None]:
     try:
-        mc = yf.Ticker(ticker).fast_info.market_cap
+        yf_ticker = BROKER_TO_YF_SYMBOLS.get(ticker, ticker)
+        mc = yf.Ticker(yf_ticker).fast_info.market_cap
         if mc and float(mc) > 0:
             return ticker, float(mc)
     except Exception:
@@ -225,17 +238,19 @@ def compute_stock_weights(
 # Portfolio snapshot
 # ---------------------------------------------------------------------------
 
-def get_portfolio_snapshot(client) -> tuple[Decimal, dict[str, Decimal], dict[str, Decimal]]:
+def get_portfolio_snapshot(client) -> tuple[Decimal, Decimal, dict[str, Decimal], dict[str, Decimal]]:
     """
     Fetch current portfolio from Public.com.
 
     Returns:
         total_equity   — sum of all asset values (cash + investments)
+        buying_power   — currently available buying power
         equity_pos     — {symbol: current_value} for EQUITY positions
         crypto_pos     — {symbol: current_value} for CRYPTO positions
     """
     portfolio = client.get_portfolio()
     total_equity = sum(e.value for e in portfolio.equity)
+    buying_power = getattr(portfolio.buying_power, "buying_power", Decimal("0"))
 
     equity_pos: dict[str, Decimal] = {}
     crypto_pos: dict[str, Decimal] = {}
@@ -247,7 +262,7 @@ def get_portfolio_snapshot(client) -> tuple[Decimal, dict[str, Decimal], dict[st
         elif pos.instrument.type == InstrumentType.CRYPTO:
             crypto_pos[pos.instrument.symbol] = pos.current_value
 
-    return total_equity, equity_pos, crypto_pos
+    return total_equity, buying_power, equity_pos, crypto_pos
 
 
 # ---------------------------------------------------------------------------
@@ -345,9 +360,10 @@ def place_orders(
     client,
     orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
     crypto_prices: dict[str, Decimal] | None = None,
-) -> None:
+) -> list[str]:
     """Place a list of (symbol, instrument_type, side, dollar_amount) market orders."""
     success = fail = 0
+    submitted_order_ids: list[str] = []
     for symbol, inst_type, side, dollar_amount in orders:
         try:
             price = (crypto_prices or {}).get(symbol)
@@ -359,12 +375,84 @@ def place_orders(
                 log.info("  ✓ %-6s %-6s $%9.2f", side.value, symbol, dollar_amount)
             new_order = client.place_order(req)
             log.info("      order id: %s", new_order.order_id[:8])
+            submitted_order_ids.append(new_order.order_id)
             success += 1
         except Exception as exc:
             log.error("  ✗ %-6s %-6s $%9.2f  → %s", side.value, symbol, dollar_amount, exc)
             fail += 1
         time.sleep(0.1)
     log.info("Orders placed: %d  |  failed: %d", success, fail)
+    return submitted_order_ids
+
+
+def wait_for_orders_to_clear(
+    client,
+    order_ids: list[str],
+    *,
+    label: str,
+    timeout_seconds: int = SELL_WAIT_TIMEOUT_SECONDS,
+) -> bool:
+    """
+    Poll until the submitted orders are no longer in an active state.
+    """
+    pending = set(order_ids)
+    if not pending:
+        return True
+
+    deadline = time.monotonic() + timeout_seconds
+    while pending and time.monotonic() < deadline:
+        portfolio = client.get_portfolio()
+        active_order_ids = {
+            order.order_id
+            for order in portfolio.orders
+            if order.status in _ACTIVE_ORDER_STATUSES
+        }
+        pending &= active_order_ids
+        if not pending:
+            log.info("All %s orders are no longer active.", label)
+            return True
+        log.info("Waiting for %d %s order(s) to clear before continuing…", len(pending), label)
+        time.sleep(ORDER_STATUS_POLL_SECONDS)
+
+    if pending:
+        log.warning("Timed out waiting for %d %s order(s) to clear.", len(pending), label)
+        return False
+    return True
+
+
+def cap_buy_orders_to_buying_power(
+    orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
+    buying_power: Decimal,
+) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
+    """
+    Keep only the prefix of buy orders that fits within currently available buying power.
+    """
+    available_budget = max(Decimal("0"), buying_power - BUYING_POWER_BUFFER)
+    if available_budget <= 0:
+        log.warning("No buy orders will be placed: buying power is only $%.2f.", buying_power)
+        return []
+
+    selected: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+    skipped: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+    remaining = available_budget
+    for order in orders:
+        amount = order[3]
+        if amount <= remaining:
+            selected.append(order)
+            remaining -= amount
+        else:
+            skipped.append(order)
+
+    total_selected = sum(order[3] for order in selected)
+    total_skipped = sum(order[3] for order in skipped)
+    log.info("Buy budget: $%.2f available after buffer, $%.2f selected, $%.2f skipped.",
+             available_budget, total_selected, total_skipped)
+    if skipped:
+        skipped_symbols = ", ".join(symbol for symbol, *_ in skipped[:10])
+        suffix = "…" if len(skipped) > 10 else ""
+        log.warning("Skipped %d buy order(s) that exceed buying power: %s%s",
+                    len(skipped), skipped_symbols, suffix)
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +481,25 @@ def compute_delta(
     if delta < -drift_threshold and abs(delta) >= MIN_ORDER_DOLLARS:
         return (symbol, instrument_type, OrderSide.SELL, abs(delta).quantize(Decimal("0.01")))
     return None
+
+
+def compute_unallocated_buy_delta(
+    target_value: Decimal,
+    current_value: Decimal,
+    threshold: Decimal,
+) -> Decimal:
+    """
+    Return the positive buy delta that is too small to place directly.
+    """
+    delta = target_value - current_value
+    drift_threshold = max(
+        target_value * REBALANCE_THRESHOLD_PCT,
+        MIN_ORDER_DOLLARS,
+        threshold,
+    )
+    if Decimal("0") < delta <= drift_threshold:
+        return delta.quantize(Decimal("0.01"))
+    return Decimal("0")
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +531,13 @@ def rebalance() -> None:
         cancel_open_orders(client, initial_portfolio.orders or [])
 
         # Re-fetch after cancellations so snapshot reflects the clean state
-        total_equity, equity_pos, crypto_pos = get_portfolio_snapshot(client)
-        log.info("  Total equity: $%.2f  |  equity positions: %d  |  crypto positions: %d",
-                 total_equity, len(equity_pos), len(crypto_pos))
+        total_equity, buying_power, equity_pos, crypto_pos = get_portfolio_snapshot(client)
+        log.info("  Total equity: $%.2f  |  buying power: $%.2f  |  equity positions: %d  |  crypto positions: %d",
+                 total_equity, buying_power, len(equity_pos), len(crypto_pos))
 
         sells: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
         buys:  list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+        stock_residual_for_sgov = Decimal("0")
 
         def queue(order):
             if order is None:
@@ -449,14 +557,15 @@ def rebalance() -> None:
             weight = stock_weights.get(symbol, Decimal("0"))
             target = (weight * ALLOC_STOCKS * total_equity).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
-            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("5.00")))
+            stock_residual_for_sgov += compute_unallocated_buy_delta(target, current, Decimal("1.00"))
+            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")))
 
-        def queue_etf_delta(symbol: str, alloc: Decimal) -> None:
-            target  = (alloc * total_equity).quantize(Decimal("0.01"))
+        def queue_etf_delta(symbol: str, alloc: Decimal, extra_target: Decimal = Decimal("0")) -> None:
+            target  = ((alloc * total_equity) + extra_target).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
             log.info("  %s  target=$%.2f  current=$%.2f  delta=$%.2f",
                      symbol, target, current, target - current)
-            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("5.00")))
+            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")))
 
         # Fetch BTC and ETH prices in parallel
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -470,18 +579,22 @@ def rebalance() -> None:
         btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
         log.info("  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
                  btc_price, btc_target, btc_current, btc_target - btc_current)
-        queue(compute_delta(BTC_SYMBOL, InstrumentType.CRYPTO, btc_target, btc_current, Decimal("5.00")))
+        queue(compute_delta(BTC_SYMBOL, InstrumentType.CRYPTO, btc_target, btc_current, Decimal("1.00")))
 
         log.info("--- Computing ETH delta ---")
         eth_target  = (ALLOC_ETH * total_equity).quantize(Decimal("0.01"))
         eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
         log.info("  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
                  eth_price, eth_target, eth_current, eth_target - eth_current)
-        queue(compute_delta(ETH_SYMBOL, InstrumentType.CRYPTO, eth_target, eth_current, Decimal("5.00")))
+        queue(compute_delta(ETH_SYMBOL, InstrumentType.CRYPTO, eth_target, eth_current, Decimal("1.00")))
 
         log.info("--- Computing GLDM / SGOV deltas ---")
         queue_etf_delta(GOLD_SYMBOL, ALLOC_GOLD)
-        queue_etf_delta(SGOV_SYMBOL, ALLOC_SGOV)
+        log.info("  Residual stock allocation too small to trade directly: $%.2f", stock_residual_for_sgov)
+        queue_etf_delta(SGOV_SYMBOL, ALLOC_SGOV, extra_target=stock_residual_for_sgov)
+
+        sells.sort(key=lambda order: (order[3], order[0]), reverse=True)
+        buys.sort(key=lambda order: (order[3], order[0]), reverse=True)
 
         log.info("Rebalance plan: %d sells  |  %d buys", len(sells), len(buys))
         if not sells and not buys:
@@ -492,8 +605,16 @@ def rebalance() -> None:
 
         if sells:
             log.info("--- Placing SELL orders (%d) ---", len(sells))
-            place_orders(client, sells, crypto_prices=crypto_prices)
+            sell_order_ids = place_orders(client, sells, crypto_prices=crypto_prices)
+            wait_for_orders_to_clear(client, sell_order_ids, label="sell")
 
+        if buys:
+            post_sell_buying_power = buying_power
+            try:
+                _, post_sell_buying_power, _, _ = get_portfolio_snapshot(client)
+            except Exception as exc:
+                log.warning("Could not refresh buying power after sells: %s", exc)
+            buys = cap_buy_orders_to_buying_power(buys, post_sell_buying_power)
         if buys:
             log.info("--- Placing BUY orders (%d) ---", len(buys))
             place_orders(client, buys, crypto_prices=crypto_prices)

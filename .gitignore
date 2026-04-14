@@ -1,0 +1,27 @@
+# Credentials — never commit
+.env
+*.env
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Cache — runtime data that may contain account/portfolio/trade info
+cache/market_caps.json
+cache/portfolio_cache.json
+cache/rebalance.log
+cache/skip_next_rebalance
+
+# Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

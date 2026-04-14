@@ -1,0 +1,14 @@
+[project]
+name = "public-terminal"
+version = "0.1.0"
+description = "Programmatic trading terminal for stocks, ETFs, options, crypto, and bonds via Public.com API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "lxml>=5.0.0",
+    "plotext>=5.2.8",
+    "publicdotcom-py>=0.1.10",
+    "python-dotenv>=1.0.0",
+    "textual>=0.80.0",
+    "yfinance>=0.2.50",
+]

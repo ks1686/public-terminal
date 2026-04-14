@@ -1,0 +1,17 @@
+[Unit]
+Description=Public Terminal — S&P 500 daily rebalance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ks1686/Documents/Projects/public-terminal
+ExecStart=/home/ks1686/Documents/Projects/public-terminal/.venv/bin/python \
+    /home/ks1686/Documents/Projects/public-terminal/rebalance.py
+StandardOutput=journal
+StandardError=journal
+# Restart on failure but cap at 3 attempts
+Restart=on-failure
+RestartSec=60
+StartLimitBurst=3
+StartLimitIntervalSec=300

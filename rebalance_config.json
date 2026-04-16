@@ -1,0 +1,5 @@
+{
+  "etf_ticker": "SPY",
+  "top_n": 100,
+  "margin_usage_pct": 0.5
+}

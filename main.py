@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -61,9 +62,23 @@ CHART_PERIODS = [
 # Map Public.com crypto symbols to yfinance tickers
 YF_TICKERS = {"BTC": "BTC-USD", "ETH": "ETH-USD"}
 
-TIMER_UNIT   = "public-terminal-rebalance.timer"
-SERVICE_UNIT = "public-terminal-rebalance.service"
-SKIP_FILE    = Path(__file__).parent / "cache" / "skip_next_rebalance"
+TIMER_UNIT             = "public-terminal-rebalance.timer"
+SERVICE_UNIT           = "public-terminal-rebalance.service"
+SKIP_FILE              = Path(__file__).parent / "cache" / "skip_next_rebalance"
+REBALANCE_CONFIG_FILE  = Path(__file__).parent / "rebalance_config.json"
+
+
+def _load_rebalance_config() -> dict:
+    try:
+        return json.loads(REBALANCE_CONFIG_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"etf_ticker": "SPY", "top_n": 100}
+
+
+def _save_rebalance_config(etf_ticker: str, top_n: int, margin_usage_pct: float) -> None:
+    REBALANCE_CONFIG_FILE.write_text(
+        json.dumps({"etf_ticker": etf_ticker, "top_n": top_n, "margin_usage_pct": margin_usage_pct}, indent=2)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +269,105 @@ class RunNowModal(ModalScreen[bool]):
 
 
 # ---------------------------------------------------------------------------
+# Rebalance settings modal
+# ---------------------------------------------------------------------------
+
+class RebalanceConfigModal(ModalScreen):
+    """Modal for configuring the index ETF and top-N stock count."""
+
+    _SUPPORTED = (
+        "S&P 500:    SPY  VOO  IVV  SPLG\n"
+        "NASDAQ-100: QQQ  QQQM\n"
+        "Dow Jones:  DIA\n"
+        "Other tickers fall back to S&P 500."
+    )
+
+    DEFAULT_CSS = """
+    RebalanceConfigModal {
+        align: center middle;
+    }
+    #cfg-dialog {
+        width: 64;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #cfg-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #cfg-hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #cfg-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #cfg-btn-save {
+        margin-right: 2;
+    }
+    """
+
+    def __init__(self, current_etf: str, current_top_n: int, current_margin_pct: float) -> None:
+        super().__init__()
+        self._current_etf = current_etf
+        self._current_top_n = current_top_n
+        self._current_margin_pct = current_margin_pct
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="cfg-dialog"):
+            yield Label("REBALANCE SETTINGS", id="cfg-title")
+            yield Label(self._SUPPORTED, id="cfg-hint")
+            yield Label("Index ETF ticker", classes="field-label")
+            yield Input(value=self._current_etf, id="input-etf")
+            yield Label("Top N stocks", classes="field-label")
+            yield Input(value=str(self._current_top_n), id="input-top-n")
+            yield Label("Margin usage (0.0 = cash only, 0.5 = 50% of margin, 1.0 = full)", classes="field-label")
+            yield Input(value=str(self._current_margin_pct), id="input-margin")
+            with Horizontal(id="cfg-btn-row"):
+                yield Button("Save", variant="success", id="cfg-btn-save")
+                yield Button("Cancel", variant="default", id="cfg-btn-cancel")
+
+    @on(Button.Pressed, "#cfg-btn-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#cfg-btn-save")
+    def save(self) -> None:
+        etf = self.query_one("#input-etf", Input).value.strip().upper()
+        top_n_str = self.query_one("#input-top-n", Input).value.strip()
+        margin_str = self.query_one("#input-margin", Input).value.strip()
+        if not etf:
+            self.query_one("#input-etf", Input).focus()
+            return
+        try:
+            top_n = int(top_n_str)
+            if top_n < 1:
+                raise ValueError
+        except ValueError:
+            self.query_one("#input-top-n", Input).focus()
+            return
+        try:
+            margin_pct = float(margin_str)
+            if not 0.0 <= margin_pct <= 1.0:
+                raise ValueError
+        except ValueError:
+            self.query_one("#input-margin", Input).focus()
+            return
+        self.dismiss({"etf_ticker": etf, "top_n": top_n, "margin_usage_pct": margin_pct})
+
+
+# ---------------------------------------------------------------------------
 # Widgets
 # ---------------------------------------------------------------------------
 
@@ -305,6 +419,9 @@ class RebalancerBar(Static):
         last_run: str,
         next_run: str,
         skip_pending: bool = False,
+        etf_ticker: str = "SPY",
+        top_n: int = 100,
+        margin_usage_pct: float = 0.5,
     ) -> None:
         t = Text()
         t.append("  REBALANCER ", style="bold magenta")
@@ -323,8 +440,9 @@ class RebalancerBar(Static):
             t.append("DISABLED", style="dim")
         if skip_pending:
             t.append("  ⚠ NEXT RUN SKIPPED", style="bold yellow")
+        t.append(f"  {etf_ticker} top-{top_n}  margin {int(margin_usage_pct * 100)}%", style="bold white")
         t.append(f"  |  Last: {last_run}  Next: {next_run}", style="dim")
-        t.append("  |  [t] Start/Stop  [e] Enable/Disable  [x] Skip Next  [R] Run Now", style="dim")
+        t.append("  |  [t] Start/Stop  [e] Enable/Disable  [x] Skip Next  [R] Run Now  [S] Settings", style="dim")
         self.update(t)
 
 
@@ -362,38 +480,47 @@ class PortfolioChart(Static):
     @work(thread=True, exclusive=True)
     def _fetch_chart(self) -> None:
         import plotext as plt
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         from rich.text import Text as RichText
 
         try:
             label, yf_period, yf_interval = CHART_PERIODS[self._period_idx]
 
-            def _fetch_one(symbol: str, qty: float) -> pd.Series | None:
-                yf_sym = YF_TICKERS.get(symbol, symbol)
-                try:
-                    data = yf.download(
-                        yf_sym, period=yf_period, interval=yf_interval,
-                        auto_adjust=True, progress=False,
-                    )
-                    if data.empty:
-                        return None
-                    close = data["Close"]
-                    if isinstance(close, pd.DataFrame):
-                        close = close.iloc[:, 0]
-                    return close.ffill() * qty
-                except Exception:
-                    return None
+            # Map broker symbols → yfinance symbols and build qty lookup
+            qty_map: dict[str, float] = {}
+            for sym, qty in self._positions:
+                yf_sym = YF_TICKERS.get(sym, sym)
+                qty_map[yf_sym] = qty_map.get(yf_sym, 0) + qty
+
+            yf_symbols = list(qty_map.keys())
+
+            # Single batched download — far faster than one request per symbol
+            data = yf.download(
+                yf_symbols,
+                period=yf_period,
+                interval=yf_interval,
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+            )
 
             portfolio_series: pd.Series | None = None
-            with ThreadPoolExecutor(max_workers=min(8, len(self._positions))) as pool:
-                futures = {pool.submit(_fetch_one, sym, qty): (sym, qty) for sym, qty in self._positions}
-                for future in as_completed(futures):
-                    series = future.result()
-                    if series is not None:
-                        portfolio_series = (
-                            series if portfolio_series is None
-                            else portfolio_series.add(series, fill_value=0)
-                        )
+            for yf_sym, qty in qty_map.items():
+                try:
+                    if len(yf_symbols) == 1:
+                        close = data["Close"]
+                    else:
+                        close = data[yf_sym]["Close"]
+                    if isinstance(close, pd.DataFrame):
+                        close = close.iloc[:, 0]
+                    series = close.ffill() * qty
+                    if series.dropna().empty:
+                        continue
+                    portfolio_series = (
+                        series if portfolio_series is None
+                        else portfolio_series.add(series, fill_value=0)
+                    )
+                except Exception:
+                    continue
 
             if portfolio_series is None or portfolio_series.dropna().empty:
                 self.app.call_from_thread(self.update, "  No chart data available for this period.")
@@ -561,6 +688,7 @@ class PublicTerminal(App):
         Binding("e", "toggle_enable_rebalancer", "Enable/Disable Rebalancer"),
         Binding("x", "skip_next_rebalance", "Skip Next Run"),
         Binding("R", "run_rebalancer_now", "Run Now"),
+        Binding("S", "rebalance_settings", "Settings"),
         Binding("[", "chart_prev", "Chart ◄"),
         Binding("]", "chart_next", "Chart ►"),
     ]
@@ -636,9 +764,21 @@ class PublicTerminal(App):
         except OSError:
             pass
 
+    def action_quit(self) -> None:
+        self.workers.cancel_all()
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+        os._exit(0)
+
     def on_unmount(self) -> None:
         if self._client is not None:
-            self._client.close()
+            try:
+                self._client.close()
+            except Exception:
+                pass
 
     def _get_client(self):
         if self._client is None:
@@ -678,8 +818,11 @@ class PublicTerminal(App):
                 next_run = val
 
         skip_pending = SKIP_FILE.exists()
+        cfg = _load_rebalance_config()
         self.call_from_thread(
-            self.query_one(RebalancerBar).update_status, active, enabled, last_run, next_run, skip_pending
+            self.query_one(RebalancerBar).update_status,
+            active, enabled, last_run, next_run, skip_pending,
+            cfg.get("etf_ticker", "SPY"), cfg.get("top_n", 100), cfg.get("margin_usage_pct", 0.5),
         )
 
     @work(thread=True)
@@ -884,6 +1027,30 @@ class PublicTerminal(App):
         else:
             self.call_from_thread(status.set_status, f"  Failed to start rebalancer: {out}", "red")
         self.call_from_thread(self.load_rebalancer_status)
+
+    def action_rebalance_settings(self) -> None:
+        cfg = _load_rebalance_config()
+        self.push_screen(
+            RebalanceConfigModal(
+                cfg.get("etf_ticker", "SPY"),
+                cfg.get("top_n", 100),
+                cfg.get("margin_usage_pct", 0.5),
+            ),
+            self._handle_rebalance_settings,
+        )
+
+    def _handle_rebalance_settings(self, result: dict | None) -> None:
+        if result is None:
+            return
+        try:
+            _save_rebalance_config(result["etf_ticker"], result["top_n"], result["margin_usage_pct"])
+            pct = int(result["margin_usage_pct"] * 100)
+            self.query_one(StatusBar).set_status(
+                f"  Rebalance config saved: {result['etf_ticker']} top-{result['top_n']}  margin {pct}%" + _HINT, "green"
+            )
+            self.load_rebalancer_status()
+        except OSError as exc:
+            self.query_one(StatusBar).set_status(f"  Failed to save config: {exc}", "red")
 
     def action_chart_prev(self) -> None:
         self.query_one(PortfolioChart).cycle_period(-1)

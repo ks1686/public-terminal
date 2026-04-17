@@ -31,6 +31,7 @@ from textual.widgets import (
 )
 
 from public_api_sdk import (
+    HistoryRequest,
     InstrumentType,
     OrderExpirationRequest,
     OrderInstrument,
@@ -342,6 +343,96 @@ class CancelConfirmModal(ModalScreen[bool]):
     @on(Button.Pressed, "#btn-no")
     def no(self) -> None:
         self.dismiss(False)
+
+
+class HistoryModal(ModalScreen):
+    """Scrollable transaction history modal."""
+
+    BINDINGS = [Binding("escape,h", "dismiss_modal", "Close", show=False)]
+
+    DEFAULT_CSS = """
+    HistoryModal {
+        align: center middle;
+    }
+    #hist-dialog {
+        width: 96;
+        height: 36;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #hist-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #hist-table {
+        height: 1fr;
+    }
+    #hist-status {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #hist-btn-row {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, client) -> None:
+        super().__init__()
+        self._client = client
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="hist-dialog"):
+            yield Label("TRANSACTION HISTORY", id="hist-title")
+            yield DataTable(id="hist-table")
+            yield Label("Loading…", id="hist-status")
+            with Horizontal(id="hist-btn-row"):
+                yield Button("Close", variant="default", id="btn-close")
+
+    def on_mount(self) -> None:
+        tbl = self.query_one("#hist-table", DataTable)
+        tbl.add_columns("DATE", "TYPE", "SYMBOL", "SIDE", "QTY", "NET")
+        tbl.cursor_type = "row"
+        self._load_history()
+
+    @work(thread=True)
+    def _load_history(self) -> None:
+        status = self.query_one("#hist-status", Label)
+        tbl = self.query_one("#hist-table", DataTable)
+        try:
+            page = self._client.get_history(history_request=HistoryRequest(page_size=100))
+            rows = []
+            for tx in page.transactions:
+                date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
+                tx_type = tx.type.value if tx.type else "—"
+                symbol = tx.symbol or "—"
+                side = tx.side.value if tx.side else "—"
+                qty = str(tx.quantity) if tx.quantity is not None else "—"
+                net = f"${tx.net_amount:,.2f}" if tx.net_amount is not None else "—"
+                side_style = (
+                    "green" if side.upper() in ("BUY", "DEBIT") else
+                    "red"   if side.upper() in ("SELL", "CREDIT") else
+                    "dim"
+                )
+                rows.append((date, tx_type, symbol, Text(side, style=side_style), qty, net))
+            def _populate():
+                for row in rows:
+                    tbl.add_row(*row)
+                status.update(f"{len(rows)} transactions  |  ESC or [h] to close")
+            self.call_from_thread(_populate)
+        except Exception as exc:
+            self.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss()
+
+    @on(Button.Pressed, "#btn-close")
+    def close(self) -> None:
+        self.dismiss()
 
 
 class RunNowModal(ModalScreen[bool]):
@@ -1294,9 +1385,7 @@ class PublicTerminal(App):
         self.query_one(PortfolioChart).cycle_period(1)
 
     def action_history(self) -> None:
-        self.query_one(StatusBar).set_status(
-            "  [h] History — not yet implemented", "yellow"
-        )
+        self.push_screen(HistoryModal(self._get_client()))
 
 
 def main() -> None:

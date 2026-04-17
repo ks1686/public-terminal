@@ -23,6 +23,11 @@ cache/today_buys.json
 # Claude Code local settings
 .claude/
 
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
 # OS
 .DS_Store
 Thumbs.db

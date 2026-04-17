@@ -13,3 +13,8 @@ dependencies = [
     "textual>=0.80.0",
     "yfinance>=0.2.50",
 ]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+]

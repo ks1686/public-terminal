@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
 
@@ -404,7 +405,8 @@ class HistoryModal(ModalScreen):
         status = self.query_one("#hist-status", Label)
         tbl = self.query_one("#hist-table", DataTable)
         try:
-            page = self._client.get_history(history_request=HistoryRequest(page_size=100))
+            start = datetime.now(timezone.utc) - timedelta(days=90)
+            page = self._client.get_history(history_request=HistoryRequest(start=start, page_size=100))
             rows = []
             for tx in page.transactions:
                 date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
@@ -422,7 +424,7 @@ class HistoryModal(ModalScreen):
             def _populate():
                 for row in rows:
                     tbl.add_row(*row)
-                status.update(f"{len(rows)} transactions  |  ESC or [h] to close")
+                status.update(f"{len(rows)} transactions (last 90 days)  |  ESC or [h] to close")
             self.app.call_from_thread(_populate)
         except Exception as exc:
             self.app.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")

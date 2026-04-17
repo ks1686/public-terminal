@@ -92,7 +92,7 @@ uv run main.py
 
 ```text
 Header (clock)
-Balance Bar       — total equity, buying power (cash / options / crypto)
+Balance Bar       — total equity, buying power, options BP, crypto BP, cash or margin balance
 Rebalancer Bar    — timer status, active config, key hint strip
 Portfolio Chart   — scrollable price history
 ┌─ PORTFOLIO ──────┐  ┌─ OPEN ORDERS ──────┐
@@ -106,16 +106,16 @@ Footer (key bindings)
 | Key | Action |
 |-----|--------|
 | `r` | Refresh portfolio, orders, and rebalancer status |
+| `l` | Toggle **live portfolio balance stream** on the chart |
 | `b` | Place a market **buy** order |
 | `s` | Place a market **sell** order |
 | `c` | Cancel the selected open order |
 | `h` | View order history |
 | `[` | Scroll portfolio chart left (earlier) |
 | `]` | Scroll portfolio chart right (later) |
-| `t` | **Start / stop** the rebalancer systemd timer (this session) |
-| `e` | **Enable / disable** the rebalancer timer (survives reboots) |
+| `t` | **Pause / resume** the installed rebalancer schedule |
+| `e` | **Install / remove** the rebalancer schedule |
 | `x` | **Skip the next** scheduled rebalance run |
-| `R` | **Run the rebalancer now** (confirmation required) |
 | `S` | Open **rebalance settings** modal |
 | `q` | Quit |
 
@@ -133,9 +133,11 @@ All orders are market orders, day-only.
 
 Select a row in the Open Orders table, then press `c`. A confirmation modal shows the order details before cancellation.
 
-### Portfolio chart (`[` / `]`)
+### Portfolio chart (`[` / `]` / `l`)
 
-Shows a price history chart for the positions in your portfolio, loaded in a single batched fetch. Use `[` and `]` to scroll the time window.
+Shows a price history chart for the positions in your portfolio, loaded in a single batched fetch. The chart title shows dollar and percentage movement for the selected time frame. The 24H view includes equity extended-hours data when available and crypto's 24/7 movement. Use `[` and `]` to scroll the time window.
+
+Press `l` to toggle live balance streaming. Live mode polls Public.com every 30 seconds, refreshes balances/holdings/orders, and keeps a rolling 24-hour total-equity stream with dollar and percentage change so you can watch portfolio value changes as they come in after hours too. Press `l` again to return to the historical chart.
 
 ---
 
@@ -177,6 +179,8 @@ effective_bp       = cash_buying_power + (margin_usage_pct × margin_capacity)
 
 All asset targets are computed against `investment_base`, so margin funds proportionally larger positions across every bucket — not just stocks. Set `margin_usage_pct = 0.0` to use cash only.
 
+The TUI checks Public.com's reported buying power before allowing margin configuration. If total buying power does not exceed cash-only buying power, the margin input is disabled and saved as `0.0`.
+
 ### PDT (Pattern Day Trading) protection
 
 A daily buy ledger (`cache/today_buys.json`) records every equity symbol purchased in any run today. Subsequent runs skip selling those symbols to avoid same-day buy+sell round-trips. The ledger resets automatically at midnight.
@@ -191,7 +195,7 @@ The settings modal lets you configure without editing any files:
 |-------|-------------|
 | **Index to track** | Determines which constituent list to track (see table below) |
 | **Top N stocks** | How many of the top constituents to hold (by market cap). Default: 500 (full index) |
-| **Margin usage** | `0.0` = cash only · `0.5` = 50% of margin capacity · `1.0` = full margin |
+| **Margin usage** | Enabled only when the account has margin buying power. `0.0` = cash only · `0.5` = 50% of margin capacity · `1.0` = full margin |
 | **Excluded tickers** | Comma-separated symbols to skip entirely (no buys, no sells) |
 
 Supported indexes:
@@ -214,20 +218,9 @@ Pressing `x` creates a `cache/skip_next_rebalance` sentinel file. The next sched
 
 The rebalancer runs as a user-level systemd service — no root access required.
 
-### Install
+### Install / Remove
 
-```bash
-public-terminal --install-service
-systemctl --user enable --now public-terminal-rebalance.timer
-```
-
-Source-run equivalent:
-
-```bash
-uv run main.py --install-service
-```
-
-The installer writes a service file for the current runtime. Source installs use the active Python interpreter and `main.py`; binary releases use the packaged executable.
+Use `e` in the TUI to install or remove the automated rebalancer schedule. Installing writes the user-level service and timer files for the current runtime, then activates the timer for the scheduled runs. Removing stops and disables the timer, then deletes those service files.
 
 The timer fires Mon–Fri at **12:00 ET** (DST-aware). `Persistent=true` means it catches up immediately after a missed run (e.g. system was off at noon).
 
@@ -235,10 +228,9 @@ The timer fires Mon–Fri at **12:00 ET** (DST-aware). `Persistent=true` means i
 
 | Key | Effect |
 |-----|--------|
-| `t` | Start or stop the timer for this session |
-| `e` | Enable or disable the timer permanently (survives reboots) |
+| `t` | Pause or resume the installed timer without removing service files |
+| `e` | Install/activate or disable/remove the scheduled timer |
 | `x` | Skip the next run |
-| `R` | Trigger an immediate run |
 
 ### Manage from the shell
 
@@ -256,6 +248,9 @@ systemctl --user stop public-terminal-rebalance.timer
 
 # Disable permanently
 systemctl --user disable --now public-terminal-rebalance.timer
+rm -f ~/.config/systemd/user/public-terminal-rebalance.service
+rm -f ~/.config/systemd/user/public-terminal-rebalance.timer
+systemctl --user daemon-reload
 ```
 
 ### Run manually

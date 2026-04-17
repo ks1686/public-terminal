@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pandas as pd
 from public_api_sdk import OrderSide
 from rich.text import Text
@@ -11,13 +13,38 @@ from textual.widgets import DataTable, Static
 from config import _ACTIVE_ORDER_STATUSES, BROKER_TO_YF_SYMBOLS
 
 CHART_PERIODS = [
-    ("1D", "1d", "5m"),
+    ("24H", "1d", "5m"),
     ("1W", "5d", "1h"),
     ("1M", "1mo", "1d"),
     ("3M", "3mo", "1d"),
     ("1Y", "1y", "1d"),
 ]
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
+LIVE_CHART_WINDOW = timedelta(hours=24)
+LIVE_CHART_MAX_RENDER_POINTS = 150
+
+
+def _holding_value_sort_key(row: dict) -> float:
+    value = row.get("value_num")
+    if isinstance(value, int | float):
+        return float(value)
+
+    value_text = str(row.get("value", ""))
+    cleaned = value_text.replace("$", "").replace(",", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+
+def _format_period_change(start: float, end: float) -> str:
+    change = end - start
+    sign = "+" if change >= 0 else ""
+    if start:
+        pct = (change / start) * 100
+        pct_sign = "+" if pct >= 0 else ""
+        return f"{sign}${change:,.2f} ({pct_sign}{pct:.2f}%)"
+    return f"{sign}${change:,.2f} (n/a)"
 
 
 def _extract_close_series(data: pd.DataFrame, yf_symbol: str) -> pd.Series | None:
@@ -63,9 +90,17 @@ class BalanceBar(Static):
     """
 
     def on_mount(self) -> None:
-        self.update_display("—", "—", "—", "—")
+        self.update_display("—", "—", "—", "—", "—", "CASH")
 
-    def update_display(self, total: str, bp: str, obp: str, cash: str) -> None:
+    def update_display(
+        self,
+        total: str,
+        bp: str,
+        obp: str,
+        crypto_bp: str,
+        cash: str,
+        cash_label: str = "CASH",
+    ) -> None:
         t = Text()
         t.append("  TOTAL EQUITY ", style="bold cyan")
         t.append(total, style="bold green")
@@ -73,13 +108,15 @@ class BalanceBar(Static):
         t.append(bp, style="bold white")
         t.append("   |   OPTIONS BP ", style="dim")
         t.append(obp, style="bold white")
-        t.append("   |   CASH ", style="dim")
+        t.append("   |   CRYPTO BP ", style="dim")
+        t.append(crypto_bp, style="bold white")
+        t.append(f"   |   {cash_label} ", style="dim")
         t.append(cash, style="bold white")
         self.update(t)
 
 
 class RebalancerBar(Static):
-    """Shows the systemd rebalancer timer status and provides start/stop/enable controls."""
+    """Shows the rebalancer schedule status and available controls."""
 
     DEFAULT_CSS = """
     RebalancerBar {
@@ -108,19 +145,27 @@ class RebalancerBar(Static):
 
         t = Text()
         t.append("  REBALANCER ", style="bold magenta")
-        if active is None:
-            t.append("—", style="dim")
-        elif active:
-            t.append("● ACTIVE", style="bold green")
-        else:
-            t.append("○ INACTIVE", style="red")
-        t.append("  ", style="dim")
+
         if enabled is None:
-            t.append("—", style="dim")
+            t.append("— NO SYSTEMD", style="dim")
+        elif enabled and active:
+            t.append("● SCHEDULED", style="bold green")
         elif enabled:
-            t.append("ENABLED", style="cyan")
+            t.append("Ⅱ PAUSED", style="bold yellow")
+        elif active:
+            t.append("● ACTIVE", style="bold cyan")
+            t.append("  NOT INSTALLED", style="dim")
         else:
-            t.append("DISABLED", style="dim")
+            t.append("○ NOT SCHEDULED", style="dim")
+
+        t.append("  ", style="dim")
+        if enabled is True:
+            t.append("INSTALLED", style="cyan")
+        elif enabled is False:
+            t.append("NOT INSTALLED", style="dim")
+        else:
+            t.append("NOT AVAILABLE", style="dim")
+
         if skip_pending:
             t.append("  ⚠ NEXT RUN SKIPPED", style="bold yellow")
         index_label = SUPPORTED_INDEXES.get(index, index)
@@ -131,7 +176,7 @@ class RebalancerBar(Static):
         )
         t.append(f"  |  Last: {last_run}  Next: {next_run}", style="dim")
         t.append(
-            "  |  [t] Start/Stop  [e] Enable/Disable  [x] Skip  [R] Run  [S] Settings  [I] Install  [D] Remove",
+            "  |  [t] Pause/Resume  [e] Install/Remove  [x] Skip  [S] Settings",
             style="dim",
         )
         self.update(t)
@@ -153,6 +198,8 @@ class PortfolioChart(Static):
         super().__init__("  Loading chart…", **kwargs)
         self._period_idx = 0  # default: 1D
         self._positions: list[tuple[str, float]] = []
+        self._live_enabled = False
+        self._live_points: list[tuple[datetime, float]] = []
 
     @staticmethod
     def _normalize_positions(positions) -> list[tuple[str, float]]:
@@ -187,15 +234,83 @@ class PortfolioChart(Static):
         if normalized == self._positions:
             return
         self._positions = normalized
+        if self._live_enabled:
+            return
         if self._positions:
             self._fetch_chart()
         else:
             self.update("  No chart data available for this period.")
 
     def cycle_period(self, direction: int) -> None:
+        if self._live_enabled:
+            return
         self._period_idx = (self._period_idx + direction) % len(CHART_PERIODS)
         if self._positions:
             self._fetch_chart()
+
+    def set_live_enabled(self, enabled: bool) -> None:
+        self._live_enabled = enabled
+        if enabled:
+            self._live_points.clear()
+            self.update("  LIVE portfolio stream waiting for first balance point…")
+        elif self._positions:
+            self._fetch_chart()
+        else:
+            self.update("  No chart data available for this period.")
+
+    def add_live_point(
+        self, total_equity: float, timestamp: datetime | None = None
+    ) -> None:
+        if not self._live_enabled:
+            return
+        self._live_points.append((timestamp or datetime.now(), total_equity))
+        cutoff = self._live_points[-1][0] - LIVE_CHART_WINDOW
+        self._live_points = [
+            point for point in self._live_points if point[0] >= cutoff
+        ]
+        self._render_live_chart()
+
+    def _render_live_chart(self) -> None:
+        import plotext as plt
+        from rich.text import Text as RichText
+
+        if not self._live_points:
+            self.update("  LIVE portfolio stream waiting for first balance point…")
+            return
+
+        points = self._live_points
+        if len(points) > LIVE_CHART_MAX_RENDER_POINTS:
+            step = max(1, len(points) // LIVE_CHART_MAX_RENDER_POINTS)
+            points = points[::step]
+            if points[-1] != self._live_points[-1]:
+                points = [*points, self._live_points[-1]]
+
+        timestamps = [point[0].strftime("%m-%d %H:%M") for point in points]
+        values = [point[1] for point in points]
+        x_nums = list(range(len(values)))
+        tick_step = max(1, len(x_nums) // 8)
+        x_ticks = x_nums[::tick_step]
+
+        size = self.size
+        w = size.width - 4 if size.width > 8 else 80
+        h = size.height - 2 if size.height > 6 else 10
+
+        change_summary = _format_period_change(values[0], values[-1])
+        title = (
+            f"LIVE 24H portfolio equity ({len(self._live_points)} point"
+            f"{'' if len(self._live_points) == 1 else 's'})  "
+            f"change {change_summary}"
+        )
+
+        plt.clf()
+        plt.plotsize(w, h)
+        plt.theme("dark")
+        plt.plot(x_nums, values, marker="braille")
+        plt.xticks(x_ticks, [timestamps[i] for i in x_ticks])
+        plt.title(title)
+        plt.ylabel("$")
+        chart_str = plt.build()
+        self.update(RichText.from_ansi(chart_str))
 
     @work(thread=True, exclusive=True)
     def _fetch_chart(self) -> None:
@@ -218,6 +333,7 @@ class PortfolioChart(Static):
                 period=yf_period,
                 interval=yf_interval,
                 auto_adjust=True,
+                prepost=True,
                 progress=False,
                 group_by="ticker",
                 timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
@@ -270,13 +386,16 @@ class PortfolioChart(Static):
                 f"[{p[0]}]" if i == self._period_idx else p[0]
                 for i, p in enumerate(CHART_PERIODS)
             )
+            period_change = _format_period_change(values[0], values[-1])
 
             plt.clf()
             plt.plotsize(w, h)
             plt.theme("dark")
             plt.plot(x_nums, values, marker="braille")
             plt.xticks(x_ticks, [timestamps[i] for i in x_ticks])
-            plt.title(f"{tabs}    < [  ] >")
+            plt.title(
+                f"{tabs}    change {period_change}    extended hours + crypto 24/7    < [  ] >"
+            )
             plt.ylabel("$")
             chart_str = plt.build()
 
@@ -294,7 +413,7 @@ class HoldingsTable(DataTable):
 
     def refresh_from_cache(self, rows: list[dict]) -> None:
         self.clear()
-        for r in rows:
+        for r in sorted(rows, key=_holding_value_sort_key, reverse=True):
             try:
                 gain = r.get("gain", "—")
                 gain_style = (

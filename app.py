@@ -23,6 +23,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Label
 
 from config import (
@@ -41,7 +42,6 @@ from modals import (
     HistoryModal,
     OrderModal,
     RebalanceConfigModal,
-    RunNowModal,
     SetupModal,
 )
 from widgets import (
@@ -53,7 +53,8 @@ from widgets import (
     StatusBar,
 )
 
-_HINT = "  |  [r] Refresh  [b] Buy  [s] Sell  [c] Cancel  [q] Quit"
+_HINT = "  |  [r] Refresh  [l] Live  [b] Buy  [s] Sell  [c] Cancel  [q] Quit"
+LIVE_PORTFOLIO_POLL_SECONDS = 30
 TIMER_UNIT = "public-terminal-rebalance.timer"
 SERVICE_UNIT = "public-terminal-rebalance.service"
 USER_SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -79,13 +80,11 @@ class PublicTerminal(App):
         Binding("s", "sell", "Sell"),
         Binding("c", "cancel_order", "Cancel Order"),
         Binding("h", "history", "History"),
-        Binding("t", "toggle_rebalancer", "Start/Stop Rebalancer"),
-        Binding("e", "toggle_enable_rebalancer", "Enable/Disable Rebalancer"),
+        Binding("l", "toggle_live_chart", "Live Chart"),
+        Binding("t", "toggle_rebalancer", "Pause/Resume Schedule"),
+        Binding("e", "toggle_enable_rebalancer", "Install/Remove Schedule"),
         Binding("x", "skip_next_rebalance", "Skip Next Run"),
-        Binding("R", "run_rebalancer_now", "Run Now"),
         Binding("S", "rebalance_settings", "Settings"),
-        Binding("I", "install_service", "Install Service"),
-        Binding("D", "remove_service", "Remove Service"),
         Binding("[", "chart_prev", "Chart ◄"),
         Binding("]", "chart_next", "Chart ►"),
     ]
@@ -93,6 +92,10 @@ class PublicTerminal(App):
     def __init__(self) -> None:
         super().__init__()
         self._client = None
+        self._margin_enabled: bool | None = None
+        self._margin_capacity = Decimal(0)
+        self._live_chart = False
+        self._live_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -110,6 +113,9 @@ class PublicTerminal(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._live_timer = self.set_interval(
+            LIVE_PORTFOLIO_POLL_SECONDS, self._poll_live_portfolio, pause=True
+        )
         if not _credentials_present():
             self.push_screen(SetupModal(), self._handle_setup)
         else:
@@ -141,8 +147,14 @@ class PublicTerminal(App):
                 b.get("total", "—"),
                 b.get("bp", "—"),
                 b.get("obp", "—"),
+                b.get("crypto_bp", "—"),
                 b.get("cash", "—"),
+                b.get("cash_label", "CASH"),
             )
+            if "margin_enabled" in b:
+                self._margin_enabled = bool(b["margin_enabled"])
+            if "margin_capacity" in b:
+                self._margin_capacity = Decimal(str(b["margin_capacity"]))
         holdings = data.get("holdings", [])
         if holdings:
             self.query_one(HoldingsTable).refresh_from_cache(holdings)
@@ -178,6 +190,53 @@ class PublicTerminal(App):
             )
         except OSError:
             pass
+
+    @staticmethod
+    def _get_margin_status(portfolio) -> tuple[bool, Decimal]:
+        buying_power_obj = getattr(portfolio, "buying_power", None)
+        raw_buying_power = getattr(buying_power_obj, "buying_power", None)
+        raw_cash_only_buying_power = getattr(
+            buying_power_obj, "cash_only_buying_power", None
+        )
+        buying_power = (
+            Decimal(str(raw_buying_power))
+            if raw_buying_power is not None
+            else Decimal("0")
+        )
+        cash_only_buying_power = (
+            Decimal(str(raw_cash_only_buying_power))
+            if raw_cash_only_buying_power is not None
+            else buying_power
+        )
+        margin_capacity = max(Decimal("0"), buying_power - cash_only_buying_power)
+        return margin_capacity > 0, margin_capacity
+
+    @staticmethod
+    def _get_crypto_buying_power(buying_power_obj) -> Decimal | None:
+        for field_name in (
+            "crypto_buying_power",
+            "cryptoBuyingPower",
+            "crypto_bp",
+            "cryptoBp",
+        ):
+            raw_value = getattr(buying_power_obj, field_name, None)
+            if raw_value is not None:
+                return Decimal(str(raw_value))
+
+        if hasattr(buying_power_obj, "model_dump"):
+            dumped = buying_power_obj.model_dump(by_alias=False)
+            for field_name in ("crypto_buying_power", "crypto_bp"):
+                raw_value = dumped.get(field_name)
+                if raw_value is not None:
+                    return Decimal(str(raw_value))
+
+            dumped_alias = buying_power_obj.model_dump(by_alias=True)
+            for field_name in ("cryptoBuyingPower", "cryptoBp"):
+                raw_value = dumped_alias.get(field_name)
+                if raw_value is not None:
+                    return Decimal(str(raw_value))
+
+        return None
 
     def action_quit(self) -> None:
         self.workers.cancel_all()
@@ -215,20 +274,17 @@ class PublicTerminal(App):
         )
         return result.returncode, (result.stdout + result.stderr).strip()
 
-    def _prepare_timer_unit(self) -> tuple[bool, str]:
-        """Ensure user-level service/timer units exist and systemd has reloaded them."""
+    def _reload_timer_unit(self) -> tuple[bool, str]:
+        """Ensure installed user-level units are visible to systemd."""
         if not _HAS_SYSTEMCTL:
             return False, "systemctl not available on this platform"
 
-        try:
-            if not (TIMER_UNIT_PATH.exists() and SERVICE_UNIT_PATH.exists()):
-                _install_service_files()
-            else:
-                rc, out = self._systemctl("daemon-reload")
-                if rc != 0:
-                    return False, out or "daemon-reload failed"
-        except Exception as exc:
-            return False, str(exc)
+        if not (TIMER_UNIT_PATH.exists() and SERVICE_UNIT_PATH.exists()):
+            return False, "schedule is not installed; press [e] to install it"
+
+        rc, out = self._systemctl("daemon-reload")
+        if rc != 0:
+            return False, out or "daemon-reload failed"
 
         return True, ""
 
@@ -293,7 +349,7 @@ class PublicTerminal(App):
             len(cfg.get("excluded_tickers", [])),
         )
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def load_portfolio(self) -> None:
         status = self.query_one(StatusBar)
         try:
@@ -303,25 +359,35 @@ class PublicTerminal(App):
             buying_power = getattr(portfolio, "buying_power", None)
             bp = getattr(buying_power, "buying_power", None) or Decimal(0)
             obp = getattr(buying_power, "options_buying_power", None) or Decimal(0)
+            crypto_bp = self._get_crypto_buying_power(buying_power)
             cash = next(
                 (e.value for e in portfolio.equity if e.type.value == "CASH"),
                 Decimal(0),
             )
+            cash_label = "MARGIN BALANCE" if cash < 0 else "CASH"
+            margin_enabled, margin_capacity = self._get_margin_status(portfolio)
+            self._margin_enabled = margin_enabled
+            self._margin_capacity = margin_capacity
 
             balance_data = {
                 "total": f"${total:,.2f}",
                 "bp": f"${bp:,.2f}",
                 "obp": f"${obp:,.2f}",
+                "crypto_bp": f"${crypto_bp:,.2f}" if crypto_bp is not None else "—",
                 "cash": f"${cash:,.2f}",
+                "cash_label": cash_label,
+                "margin_enabled": margin_enabled,
+                "margin_capacity": str(margin_capacity),
             }
             holdings_data: list[dict] = []
             for pos in portfolio.positions:
+                current_value = pos.current_value or Decimal(0)
                 price = (
                     f"${pos.last_price.last_price:,.2f}"
                     if pos.last_price and pos.last_price.last_price
                     else "—"
                 )
-                value = f"${pos.current_value:,.2f}" if pos.current_value else "—"
+                value = f"${current_value:,.2f}" if pos.current_value else "—"
                 if (
                     pos.position_daily_gain
                     and pos.position_daily_gain.gain_percentage is not None
@@ -338,6 +404,7 @@ class PublicTerminal(App):
                         "qty": str(pos.quantity),
                         "price": price,
                         "value": value,
+                        "value_num": float(current_value),
                         "gain": gain_str,
                         "gain_positive": gain_positive,
                     }
@@ -375,7 +442,9 @@ class PublicTerminal(App):
                 balance_data["total"],
                 balance_data["bp"],
                 balance_data["obp"],
+                balance_data["crypto_bp"],
                 balance_data["cash"],
+                balance_data["cash_label"],
             )
             self.call_from_thread(
                 self.query_one(HoldingsTable).refresh_from_cache, holdings_data
@@ -383,11 +452,20 @@ class PublicTerminal(App):
             self.call_from_thread(
                 self.query_one(PortfolioChart).set_positions, portfolio.positions
             )
+            if self._live_chart:
+                self.call_from_thread(
+                    self.query_one(PortfolioChart).add_live_point, float(total)
+                )
             self.call_from_thread(
                 self.query_one(OrdersTable).refresh_from_orders, portfolio.orders
             )
+            stream_suffix = (
+                f"  |  LIVE 24H/{LIVE_PORTFOLIO_POLL_SECONDS}s"
+                if self._live_chart
+                else ""
+            )
             self.call_from_thread(
-                status.set_status, f"  {portfolio.account_id}" + _HINT
+                status.set_status, f"  {portfolio.account_id}{stream_suffix}" + _HINT
             )
         except Exception as exc:
             self.call_from_thread(
@@ -397,6 +475,30 @@ class PublicTerminal(App):
     def action_refresh(self) -> None:
         self.load_portfolio()
         self.load_rebalancer_status()
+
+    def _poll_live_portfolio(self) -> None:
+        if self._live_chart:
+            self.load_portfolio()
+
+    def action_toggle_live_chart(self) -> None:
+        self._live_chart = not self._live_chart
+        chart = self.query_one(PortfolioChart)
+        status = self.query_one(StatusBar)
+        if self._live_chart:
+            chart.set_live_enabled(True)
+            if self._live_timer is not None:
+                self._live_timer.resume()
+            status.set_status(
+                f"  Live 24H portfolio stream ON — polling every {LIVE_PORTFOLIO_POLL_SECONDS}s"
+                + _HINT,
+                "green",
+            )
+            self.load_portfolio()
+        else:
+            if self._live_timer is not None:
+                self._live_timer.pause()
+            chart.set_live_enabled(False)
+            status.set_status("  Live portfolio stream OFF" + _HINT, "cyan")
 
     def action_buy(self) -> None:
         self.push_screen(OrderModal(OrderSide.BUY), self._handle_order_result)
@@ -485,21 +587,58 @@ class PublicTerminal(App):
     @work(thread=True)
     def action_toggle_rebalancer(self) -> None:
         status = self.query_one(StatusBar)
+        if not _HAS_SYSTEMCTL:
+            self.call_from_thread(
+                status.set_status,
+                "  Pause/resume requires systemctl on this platform.",
+                "red",
+            )
+            return
+
+        rc_enabled, _ = self._systemctl("is-enabled", TIMER_UNIT)
+        if rc_enabled != 0:
+            self.call_from_thread(
+                status.set_status,
+                "  No rebalancer schedule installed — press [e] to install it."
+                + _HINT,
+                "yellow",
+            )
+            self.call_from_thread(self.load_rebalancer_status)
+            return
+
         rc, _ = self._systemctl("is-active", TIMER_UNIT)
         if rc == 0:
+            self.call_from_thread(
+                status.set_status,
+                "  Pausing rebalancer schedule…" + _HINT,
+                "yellow",
+            )
             rc2, out = self._systemctl("stop", TIMER_UNIT)
-            msg = "  Rebalancer stopped." if rc2 == 0 else f"  Stop failed: {out}"
+            msg = (
+                "  Rebalancer schedule paused — press [t] to resume."
+                if rc2 == 0
+                else f"  Pause failed: {out}"
+            )
         else:
-            ok, prep_msg = self._prepare_timer_unit()
+            self.call_from_thread(
+                status.set_status,
+                "  Resuming rebalancer schedule…" + _HINT,
+                "yellow",
+            )
+            ok, prep_msg = self._reload_timer_unit()
             if not ok:
                 self.call_from_thread(
                     status.set_status,
-                    f"  Could not prepare timer unit: {prep_msg}",
+                    f"  Could not resume schedule: {prep_msg}",
                     "red",
                 )
                 return
             rc2, out = self._systemctl("start", TIMER_UNIT)
-            msg = "  Rebalancer started." if rc2 == 0 else f"  Start failed: {out}"
+            msg = (
+                "  Rebalancer schedule resumed — next run follows the 12:00 ET schedule."
+                if rc2 == 0
+                else f"  Resume failed: {out}"
+            )
         self.call_from_thread(
             status.set_status, msg + _HINT, "green" if rc2 == 0 else "red"
         )
@@ -508,30 +647,62 @@ class PublicTerminal(App):
     @work(thread=True)
     def action_toggle_enable_rebalancer(self) -> None:
         status = self.query_one(StatusBar)
+        if not _HAS_SYSTEMCTL:
+            self.call_from_thread(
+                status.set_status,
+                "  Install/remove schedule requires systemctl on this platform.",
+                "red",
+            )
+            return
+
         rc, _ = self._systemctl("is-enabled", TIMER_UNIT)
         if rc == 0:
-            rc2, out = self._systemctl("disable", TIMER_UNIT)
-            msg = (
-                "  Rebalancer disabled (won't start on login)."
-                if rc2 == 0
-                else f"  Disable failed: {out}"
+            self.call_from_thread(
+                status.set_status,
+                "  Removing rebalancer schedule…" + _HINT,
+                "yellow",
             )
-        else:
-            ok, prep_msg = self._prepare_timer_unit()
-            if not ok:
+            try:
+                _remove_service_files()
                 self.call_from_thread(
                     status.set_status,
-                    f"  Could not prepare timer unit: {prep_msg}",
+                    "  Rebalancer schedule removed." + _HINT,
+                    "cyan",
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    status.set_status, f"  Remove schedule failed: {exc}", "red"
+                )
+                return
+        else:
+            self.call_from_thread(
+                status.set_status,
+                "  Installing rebalancer schedule…" + _HINT,
+                "yellow",
+            )
+            try:
+                _install_service_files()
+                rc2, out = self._systemctl("enable", "--now", TIMER_UNIT)
+            except Exception as exc:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Install/enable failed: {exc}",
                     "red",
                 )
                 return
-            rc2, out = self._systemctl("enable", TIMER_UNIT)
-            msg = (
-                "  Rebalancer enabled (starts automatically on login)."
-                if rc2 == 0
-                else f"  Enable failed: {out}"
+            if rc2 != 0:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Schedule activation failed: {out}" + _HINT,
+                    "red",
+                )
+                return
+            self.call_from_thread(
+                status.set_status,
+                "  Rebalancer timer enabled — scheduled Mon-Fri at 12:00 ET."
+                + _HINT,
+                "green",
             )
-        self.call_from_thread(status.set_status, msg, "cyan" if rc2 == 0 else "red")
         self.call_from_thread(self.load_rebalancer_status)
 
     def action_skip_next_rebalance(self) -> None:
@@ -550,47 +721,6 @@ class PublicTerminal(App):
                 "yellow",
             )
         self.load_rebalancer_status()
-
-    def action_run_rebalancer_now(self) -> None:
-        self.push_screen(RunNowModal(), self._handle_run_now)
-
-    def _handle_run_now(self, confirmed: bool) -> None:
-        if confirmed:
-            self._do_run_now()
-
-    @work(thread=True)
-    def _do_run_now(self) -> None:
-        status = self.query_one(StatusBar)
-        if _HAS_SYSTEMCTL:
-            rc, out = self._systemctl("start", SERVICE_UNIT)
-            if rc == 0:
-                self.call_from_thread(
-                    status.set_status,
-                    "  Rebalancer triggered — check cache/rebalance.log for progress."
-                    + _HINT,
-                    "green",
-                )
-                self.call_from_thread(self.load_rebalancer_status)
-                return
-        # systemctl unavailable or unit not installed — run rebalancer directly in this thread
-        self.call_from_thread(
-            status.set_status,
-            "  Rebalancer running (no systemd service) — this may take several minutes…"
-            + _HINT,
-            "yellow",
-        )
-        try:
-            from rebalance import rebalance
-
-            rebalance()
-            self.call_from_thread(
-                status.set_status,
-                "  Rebalance complete — check cache/rebalance.log for details." + _HINT,
-                "green",
-            )
-        except Exception as exc:
-            self.call_from_thread(status.set_status, f"  Rebalance error: {exc}", "red")
-        self.call_from_thread(self.load_rebalancer_status)
 
     def action_rebalance_settings(self) -> None:
         from rebalance import (
@@ -613,6 +743,8 @@ class PublicTerminal(App):
                 cfg.get("margin_usage_pct", 0.5),
                 cfg.get("excluded_tickers", []),
                 current_allocs,
+                self._margin_enabled,
+                self._margin_capacity,
             ),
             self._handle_rebalance_settings,
         )
@@ -652,33 +784,6 @@ class PublicTerminal(App):
             self.query_one(StatusBar).set_status(
                 f"  Failed to save config: {exc}", "red"
             )
-
-    @work(thread=True)
-    def action_install_service(self) -> None:
-        status = self.query_one(StatusBar)
-        self.call_from_thread(
-            status.set_status, "  Installing systemd service…" + _HINT, "yellow"
-        )
-        try:
-            msg = _install_service_files()
-            short = msg.splitlines()[0]
-            self.call_from_thread(status.set_status, f"  {short}" + _HINT, "green")
-            self.call_from_thread(self.load_rebalancer_status)
-        except Exception as exc:
-            self.call_from_thread(status.set_status, f"  Install failed: {exc}", "red")
-
-    @work(thread=True)
-    def action_remove_service(self) -> None:
-        status = self.query_one(StatusBar)
-        self.call_from_thread(
-            status.set_status, "  Removing systemd service…" + _HINT, "yellow"
-        )
-        try:
-            msg = _remove_service_files()
-            self.call_from_thread(status.set_status, f"  {msg}" + _HINT, "cyan")
-            self.call_from_thread(self.load_rebalancer_status)
-        except Exception as exc:
-            self.call_from_thread(status.set_status, f"  Remove failed: {exc}", "red")
 
     def action_chart_prev(self) -> None:
         self.query_one(PortfolioChart).cycle_period(-1)

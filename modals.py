@@ -414,57 +414,6 @@ class HistoryModal(ModalScreen):
 
 
 # ---------------------------------------------------------------------------
-# Run-now confirmation
-# ---------------------------------------------------------------------------
-
-
-class RunNowModal(ModalScreen[bool]):
-    """Confirmation before triggering an immediate rebalance."""
-
-    DEFAULT_CSS = """
-    RunNowModal {
-        align: center middle;
-    }
-    #run-dialog {
-        width: 54;
-        height: auto;
-        border: thick $warning;
-        background: $surface;
-        padding: 1 2;
-    }
-    #run-title {
-        text-align: center;
-        text-style: bold;
-        height: 1;
-        margin-bottom: 1;
-    }
-    #run-btn-row {
-        margin-top: 1;
-        height: 3;
-        align: center middle;
-    }
-    """
-
-    def compose(self):
-        with Grid(id="run-dialog"):
-            yield Label("RUN REBALANCER NOW", id="run-title")
-            yield Label(
-                "This will immediately place market orders to\nrebalance your portfolio. Proceed?"
-            )
-            with Horizontal(id="run-btn-row"):
-                yield Button("Run Now", variant="warning", id="btn-run")
-                yield Button("Cancel", variant="default", id="btn-cancel")
-
-    @on(Button.Pressed, "#btn-run")
-    def run(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#btn-cancel")
-    def cancel(self) -> None:
-        self.dismiss(False)
-
-
-# ---------------------------------------------------------------------------
 # Rebalance settings
 # ---------------------------------------------------------------------------
 
@@ -477,7 +426,8 @@ class RebalanceConfigModal(ModalScreen):
         align: center middle;
     }
     #cfg-dialog {
-        width: 72;
+        width: 96;
+        max-width: 95vw;
         height: auto;
         max-height: 90vh;
         border: thick $primary;
@@ -495,11 +445,23 @@ class RebalanceConfigModal(ModalScreen):
         text-style: bold;
         margin-top: 1;
         color: $primary;
-        height: 1;
+        height: auto;
     }
     .field-label {
-        height: 1;
+        width: 100%;
+        height: auto;
         margin-top: 1;
+        color: $text-muted;
+    }
+    .field-help {
+        width: 100%;
+        height: auto;
+        color: $text-muted;
+    }
+    .field-blocked {
+        color: $warning;
+    }
+    #input-margin:disabled {
         color: $text-muted;
     }
     #alloc-sum {
@@ -543,6 +505,8 @@ class RebalanceConfigModal(ModalScreen):
         current_margin_pct: float,
         current_excluded: list[str],
         current_allocs: dict[str, float],
+        margin_enabled: bool | None,
+        margin_capacity: Decimal,
     ) -> None:
         super().__init__()
         self._current_index = current_index
@@ -550,6 +514,8 @@ class RebalanceConfigModal(ModalScreen):
         self._current_margin_pct = current_margin_pct
         self._current_excluded = current_excluded
         self._current_allocs = current_allocs
+        self._margin_enabled = margin_enabled
+        self._margin_capacity = margin_capacity
 
     def compose(self):
         from rebalance import SUPPORTED_INDEXES
@@ -557,49 +523,65 @@ class RebalanceConfigModal(ModalScreen):
         a = self._current_allocs
         excluded_str = ", ".join(sorted(self._current_excluded))
         index_options = [(label, key) for key, label in SUPPORTED_INDEXES.items()]
+        margin_available = self._margin_enabled is True
+        margin_value = self._current_margin_pct if margin_available else 0.0
+        margin_capacity = f"${self._margin_capacity:,.2f}"
         with Grid(id="cfg-dialog"):
             yield Label("REBALANCE SETTINGS", id="cfg-title")
 
-            yield Label(
-                "─── Index & Stocks ───────────────────────────────────",
-                id="cfg-section-index",
-            )
+            yield Label("Index & Stocks", id="cfg-section-index")
             yield Label("Index to track", classes="field-label")
             yield Select(index_options, value=self._current_index, id="select-index")
             yield Label(
-                "Top N stocks by market cap  (default: full index)",
+                "Top N stocks by market cap",
                 classes="field-label",
             )
+            yield Label("Default: full index", classes="field-help")
             yield Input(value=str(self._current_top_n), id="input-top-n")
             yield Label(
-                "Excluded tickers  (comma-separated, leave blank for none)",
+                "Excluded tickers",
                 classes="field-label",
             )
+            yield Label("Comma-separated; leave blank for none", classes="field-help")
             yield Input(
                 value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded"
             )
 
+            yield Label("Margin", id="cfg-section-margin")
             yield Label(
-                "─── Margin ───────────────────────────────────────────",
-                id="cfg-section-margin",
-            )
-            yield Label(
-                "Margin usage  (0.0 = cash only · 0.5 = 50% of margin · 1.0 = full)",
+                "Margin usage",
                 classes="field-label",
             )
-            yield Input(value=str(self._current_margin_pct), id="input-margin")
-
-            yield Label(
-                "─── Target Allocation (must sum to 100%) ─────────────",
-                id="cfg-section-alloc",
+            if margin_available:
+                yield Label(
+                    "0.0 = cash only | 0.5 = 50% of margin | "
+                    f"1.0 = full | Capacity: {margin_capacity}",
+                    classes="field-help",
+                )
+            else:
+                yield Label(
+                    "Margin buying power is not enabled on this account; "
+                    "rebalancer will use cash only.",
+                    classes="field-help field-blocked",
+                )
+            yield Input(
+                value=str(margin_value),
+                id="input-margin",
+                disabled=not margin_available,
             )
+
+            yield Label("Target Allocation (must sum to 100%)", id="cfg-section-alloc")
             yield Label(
                 "These percentages are target portfolio weights for each bucket.",
                 classes="field-label",
             )
             yield Label(
-                "Stocks = Top N index basket | BTC = Bitcoin | ETH = Ethereum | Gold = GLDM ETF | Cash = left uninvested",
-                classes="field-label",
+                "Stocks = Top N index basket | BTC = Bitcoin | ETH = Ethereum",
+                classes="field-help",
+            )
+            yield Label(
+                "Gold = GLDM ETF | Cash = left uninvested",
+                classes="field-help",
             )
             yield Label("Stocks % (Top N index basket)", classes="field-label")
             yield Input(
@@ -686,16 +668,19 @@ class RebalanceConfigModal(ModalScreen):
             )
             self.query_one("#input-top-n", Input).focus()
             return
-        try:
-            margin_pct = float(margin_str)
-            if not 0.0 <= margin_pct <= 1.0:
-                raise ValueError
-        except ValueError:
-            self.query_one("#cfg-error", Label).update(
-                "Margin must be a number between 0.0 and 1.0."
-            )
-            self.query_one("#input-margin", Input).focus()
-            return
+        if self._margin_enabled is True:
+            try:
+                margin_pct = float(margin_str)
+                if not 0.0 <= margin_pct <= 1.0:
+                    raise ValueError
+            except ValueError:
+                self.query_one("#cfg-error", Label).update(
+                    "Margin must be a number between 0.0 and 1.0."
+                )
+                self.query_one("#input-margin", Input).focus()
+                return
+        else:
+            margin_pct = 0.0
         alloc_pcts, total, alloc_error = self._parse_alloc_inputs()
         if alloc_error:
             self.query_one("#cfg-error", Label).update(alloc_error)

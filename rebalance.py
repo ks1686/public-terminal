@@ -1267,7 +1267,12 @@ def rebalance() -> None:
             equity_qty,
             crypto_qty,
         ) = get_portfolio_snapshot(client)
-        margin_capacity = buying_power - cash_only_bp
+        # Total margin capacity (amount borrowable against equity for a Reg-T 2x
+        # margin account) ≈ total_equity. The API's (buying_power - cash_only_bp)
+        # gives only the REMAINING unused headroom, which shrinks as positions are
+        # deployed — not what users mean by "% of my margin". cap_buy_orders_to_buying_power
+        # acts as the downstream safety net against Public's real-time limit.
+        margin_capacity = max(Decimal("0"), total_equity) if buying_power > cash_only_bp else Decimal("0")
         margin_to_deploy = margin_usage_pct * margin_capacity
         investment_base = total_equity + margin_to_deploy
         effective_buying_power = cash_only_bp + margin_to_deploy
@@ -1494,10 +1499,20 @@ def rebalance() -> None:
             if buys:
                 post_sell_effective_bp = effective_buying_power
                 try:
-                    _, post_bp, post_cash_bp, _, _, _, _ = get_portfolio_snapshot(
-                        client
+                    (
+                        post_equity,
+                        post_bp,
+                        post_cash_bp,
+                        _,
+                        _,
+                        _,
+                        _,
+                    ) = get_portfolio_snapshot(client)
+                    post_margin_cap = (
+                        max(Decimal("0"), post_equity)
+                        if post_bp > post_cash_bp
+                        else Decimal("0")
                     )
-                    post_margin_cap = post_bp - post_cash_bp
                     post_sell_effective_bp = (
                         post_cash_bp + margin_usage_pct * post_margin_cap
                     )

@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +43,7 @@ from modals import (
     HistoryModal,
     OrderModal,
     RebalanceConfigModal,
+    RebalanceNowConfirmModal,
     SetupModal,
 )
 from widgets import (
@@ -84,6 +86,7 @@ class PublicTerminal(App):
         Binding("t", "toggle_rebalancer", "Pause/Resume Schedule"),
         Binding("e", "toggle_enable_rebalancer", "Install/Remove Schedule"),
         Binding("x", "skip_next_rebalance", "Skip Next Run"),
+        Binding("R", "rebalance_now", "Rebalance Now"),
         Binding("S", "rebalance_settings", "Settings"),
         Binding("[", "chart_prev", "Chart ◄"),
         Binding("]", "chart_next", "Chart ►"),
@@ -208,8 +211,15 @@ class PublicTerminal(App):
             if raw_cash_only_buying_power is not None
             else buying_power
         )
-        margin_capacity = max(Decimal("0"), buying_power - cash_only_buying_power)
-        return margin_capacity > 0, margin_capacity
+        margin_enabled = buying_power > cash_only_buying_power
+        total_equity = sum(
+            (e.value for e in getattr(portfolio, "equity", []) or []),
+            Decimal("0"),
+        )
+        margin_capacity = (
+            max(Decimal("0"), total_equity) if margin_enabled else Decimal("0")
+        )
+        return margin_enabled, margin_capacity
 
     @staticmethod
     def _get_crypto_buying_power(buying_power_obj) -> Decimal | None:
@@ -721,6 +731,65 @@ class PublicTerminal(App):
                 "yellow",
             )
         self.load_rebalancer_status()
+
+    def action_rebalance_now(self) -> None:
+        self.push_screen(
+            RebalanceNowConfirmModal(), self._handle_rebalance_now_result
+        )
+
+    def _handle_rebalance_now_result(self, confirmed: bool) -> None:
+        if confirmed:
+            self._trigger_rebalance_now()
+
+    @work(thread=True)
+    def _trigger_rebalance_now(self) -> None:
+        status = self.query_one(StatusBar)
+        self.call_from_thread(
+            status.set_status, "  Starting on-demand rebalance…" + _HINT, "yellow"
+        )
+
+        if _HAS_SYSTEMCTL and SERVICE_UNIT_PATH.exists():
+            rc, out = self._systemctl("start", "--no-block", SERVICE_UNIT)
+            if rc == 0:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Rebalance started — tail logs with: journalctl --user -u {SERVICE_UNIT} -f"
+                    + _HINT,
+                    "green",
+                )
+            else:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Failed to start rebalance: {out}" + _HINT,
+                    "red",
+                )
+            self.call_from_thread(self.load_rebalancer_status)
+            return
+
+        try:
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--rebalance"]
+            else:
+                main_py = (Path(__file__).parent / "main.py").resolve()
+                cmd = [sys.executable, str(main_py), "--rebalance"]
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                status.set_status, f"  Failed to start rebalance: {exc}" + _HINT, "red"
+            )
+            return
+
+        self.call_from_thread(
+            status.set_status,
+            "  Rebalance started — logs in cache/rebalance.log" + _HINT,
+            "green",
+        )
 
     def action_rebalance_settings(self) -> None:
         from rebalance import (

@@ -280,6 +280,58 @@ class CancelConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class RebalanceNowConfirmModal(ModalScreen[bool]):
+    """Confirmation dialog before triggering an on-demand rebalance."""
+
+    DEFAULT_CSS = """
+    RebalanceNowConfirmModal {
+        align: center middle;
+    }
+    #rebnow-dialog {
+        width: 60;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #rebnow-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #rebnow-body {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #rebnow-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def compose(self):
+        with Grid(id="rebnow-dialog"):
+            yield Label("RUN REBALANCE NOW", id="rebnow-title")
+            yield Label(
+                "Rebalance the portfolio using current settings? "
+                "Orders will be placed immediately against live markets.",
+                id="rebnow-body",
+            )
+            with Horizontal(id="rebnow-btn-row"):
+                yield Button("Yes, rebalance", variant="warning", id="btn-yes")
+                yield Button("No", variant="default", id="btn-no")
+
+    @on(Button.Pressed, "#btn-yes")
+    def yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn-no")
+    def no(self) -> None:
+        self.dismiss(False)
+
+
 # ---------------------------------------------------------------------------
 # Transaction history
 # ---------------------------------------------------------------------------

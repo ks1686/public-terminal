@@ -31,32 +31,62 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 
 ---
 
-## Setup
+## Installation
 
-### 1. Prerequisites
+### Option A: Install as a CLI tool (recommended)
+
+Install from PyPI (once published):
+
+```bash
+uv tool install public-terminal
+# or
+pipx install public-terminal
+```
+
+Install directly from a GitHub release wheel:
+
+```bash
+uv tool install https://github.com/<OWNER>/<REPO>/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
+# or
+pipx install https://github.com/<OWNER>/<REPO>/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
+```
+
+Launch commands:
+
+```bash
+public-terminal
+public-terminal-rebalance
+```
+
+For installed CLI tools, runtime files live in:
+
+```text
+$XDG_CONFIG_HOME/public-terminal/
+# default: ~/.config/public-terminal/
+```
+
+### Option B: Run from source (developer/local)
+
+Prerequisites:
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - A [Public.com](https://public.com) brokerage account with API access
 
-### 2. Install dependencies
+Install dependencies:
 
 ```bash
 uv sync
 ```
 
-### 3. Configure credentials
-
-Create `.env` in the project root:
+Configure credentials by creating `.env` in the project root:
 
 ```env
 PUBLIC_ACCESS_TOKEN=<your API secret key from public.com>
 PUBLIC_ACCOUNT_NUMBER=<your brokerage account number, e.g. 5OP95222>
 ```
 
-Both values are in your Public.com account settings. The SDK exchanges the access token for short-lived bearer tokens automatically.
-
-### 4. Launch
+Launch:
 
 ```bash
 uv run main.py
@@ -100,6 +130,7 @@ Footer (key bindings)
 ### Placing orders (`b` / `s`)
 
 A modal prompts for:
+
 - **Symbol** — e.g. `AAPL`, `BTC`, `GLDM`
 - **Instrument type** — Equity or Crypto
 - **Quantity** — shares or coin units (fractional supported)
@@ -194,8 +225,14 @@ The rebalancer runs as a user-level systemd service — no root access required.
 ### Install
 
 ```bash
-uv run main.py --install-service
+public-terminal --install-service
 systemctl --user enable --now public-terminal-rebalance.timer
+```
+
+Source-run equivalent:
+
+```bash
+uv run main.py --install-service
 ```
 
 The installer writes a service file for the current runtime. Source installs use the active Python interpreter and `main.py`; binary releases use the packaged executable.
@@ -232,12 +269,19 @@ systemctl --user disable --now public-terminal-rebalance.timer
 ### Run manually
 
 ```bash
+public-terminal-rebalance
+
+# source-run equivalent
 uv run rebalance.py
 ```
 
 ---
 
 ## Configuration files
+
+For CLI installs (`uv tool install`, `pipx install`), these are stored under
+`~/.config/public-terminal/` (or `$XDG_CONFIG_HOME/public-terminal/`).
+For source runs, they are stored in the project directory.
 
 | File | Purpose |
 |------|---------|

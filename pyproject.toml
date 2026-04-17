@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "public-terminal"
 version = "0.1.0"
@@ -13,6 +17,13 @@ dependencies = [
     "textual>=0.80.0",
     "yfinance>=0.2.50",
 ]
+
+[project.scripts]
+public-terminal = "main:main"
+public-terminal-rebalance = "rebalance:rebalance"
+
+[tool.setuptools]
+py-modules = ["app", "client", "config", "main", "modals", "rebalance", "widgets"]
 
 [dependency-groups]
 dev = [

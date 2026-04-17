@@ -20,7 +20,14 @@ def _app_dir() -> Path:
     """Base directory for config, cache, and data (frozen-binary aware)."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
-    return Path(__file__).parent
+    source_dir = Path(__file__).resolve().parent
+    if (source_dir / "pyproject.toml").exists():
+        return source_dir
+
+    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    app_dir = xdg_config_home / "public-terminal"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
 
 
 _APP_DIR = _app_dir()

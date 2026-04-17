@@ -122,6 +122,17 @@ jobs:
         with:
           path: dist/
 
+      - name: Create stable latest wheel asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_path="$(find dist -type f -name 'public_terminal-*.whl' | sort | head -n 1)"
+          if [ -z "$wheel_path" ]; then
+            echo "No wheel artifact found"
+            exit 1
+          fi
+          cp "$wheel_path" dist/public_terminal-latest-py3-none-any.whl
+
       - name: Generate SHA256 checksums
         shell: bash
         run: |

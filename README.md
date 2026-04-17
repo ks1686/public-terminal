@@ -2,20 +2,6 @@
 
 A btop/htop-style trading TUI for [Public.com](https://public.com), with direct index investing and automated daily portfolio rebalancing.
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  PUBLIC TERMINAL                                          12:00:00  04-16-26 │
-│  Total $17,055  BP $1.51  Options BP $0.00  Crypto BP $0.00                 │
-│  REBALANCER ● ACTIVE  ENABLED  S&P 500 top-100  margin 50%  | Last: ...     │
-│  [Portfolio chart]                                                           │
-│  ┌─ PORTFOLIO ──────────────────┐  ┌─ OPEN ORDERS ──────────────────────┐  │
-│  │ Symbol  Value   Qty   Chg%   │  │ ID      Side  Symbol  Amount  Status│  │
-│  │ NVDA    1459   12.3   -1.2%  │  │ ...                                  │  │
-│  │ ...                          │  │                                      │  │
-│  └──────────────────────────────┘  └──────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
 ---
 
 ## Features
@@ -33,39 +19,45 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 
 ## Installation
 
-### Option A: Install as a CLI tool (recommended)
+### Latest release (single command)
 
-Install from PyPI (once published):
-
-```bash
-uv tool install public-terminal
-# or
-pipx install public-terminal
-```
-
-Install directly from a GitHub release wheel:
+Use either command below. Both install the newest GitHub release:
 
 ```bash
-uv tool install https://github.com/<OWNER>/<REPO>/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
-# or
-pipx install https://github.com/<OWNER>/<REPO>/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
+uv tool install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest-py3-none-any.whl
 ```
 
-Launch commands:
+```bash
+pipx install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest-py3-none-any.whl
+```
+
+### Specific release (single command)
+
+Pin to an exact version by replacing `vX.Y.Z`:
+
+```bash
+uv tool install --force https://github.com/ks1686/public-terminal/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
+```
+
+```bash
+pipx install --force https://github.com/ks1686/public-terminal/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
+```
+
+### Run
 
 ```bash
 public-terminal
 public-terminal-rebalance
 ```
 
-For installed CLI tools, runtime files live in:
+Installed tool runtime files are stored in:
 
 ```text
 $XDG_CONFIG_HOME/public-terminal/
 # default: ~/.config/public-terminal/
 ```
 
-### Option B: Run from source (developer/local)
+### Source setup (dev only)
 
 Prerequisites:
 

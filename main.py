@@ -423,9 +423,9 @@ class HistoryModal(ModalScreen):
                 for row in rows:
                     tbl.add_row(*row)
                 status.update(f"{len(rows)} transactions  |  ESC or [h] to close")
-            self.call_from_thread(_populate)
+            self.app.call_from_thread(_populate)
         except Exception as exc:
-            self.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
+            self.app.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
 
     def action_dismiss_modal(self) -> None:
         self.dismiss()

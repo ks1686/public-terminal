@@ -8,6 +8,7 @@ import signal
 import subprocess
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 from public_api_sdk import (
     InstrumentType,
@@ -55,6 +56,9 @@ from widgets import (
 _HINT = "  |  [r] Refresh  [b] Buy  [s] Sell  [c] Cancel  [q] Quit"
 TIMER_UNIT = "public-terminal-rebalance.timer"
 SERVICE_UNIT = "public-terminal-rebalance.service"
+USER_SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
+TIMER_UNIT_PATH = USER_SYSTEMD_DIR / TIMER_UNIT
+SERVICE_UNIT_PATH = USER_SYSTEMD_DIR / SERVICE_UNIT
 
 
 class PublicTerminal(App):
@@ -210,6 +214,23 @@ class PublicTerminal(App):
             text=True,
         )
         return result.returncode, (result.stdout + result.stderr).strip()
+
+    def _prepare_timer_unit(self) -> tuple[bool, str]:
+        """Ensure user-level service/timer units exist and systemd has reloaded them."""
+        if not _HAS_SYSTEMCTL:
+            return False, "systemctl not available on this platform"
+
+        try:
+            if not (TIMER_UNIT_PATH.exists() and SERVICE_UNIT_PATH.exists()):
+                _install_service_files()
+            else:
+                rc, out = self._systemctl("daemon-reload")
+                if rc != 0:
+                    return False, out or "daemon-reload failed"
+        except Exception as exc:
+            return False, str(exc)
+
+        return True, ""
 
     @work(thread=True)
     def load_rebalancer_status(self) -> None:
@@ -469,6 +490,14 @@ class PublicTerminal(App):
             rc2, out = self._systemctl("stop", TIMER_UNIT)
             msg = "  Rebalancer stopped." if rc2 == 0 else f"  Stop failed: {out}"
         else:
+            ok, prep_msg = self._prepare_timer_unit()
+            if not ok:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Could not prepare timer unit: {prep_msg}",
+                    "red",
+                )
+                return
             rc2, out = self._systemctl("start", TIMER_UNIT)
             msg = "  Rebalancer started." if rc2 == 0 else f"  Start failed: {out}"
         self.call_from_thread(
@@ -488,6 +517,14 @@ class PublicTerminal(App):
                 else f"  Disable failed: {out}"
             )
         else:
+            ok, prep_msg = self._prepare_timer_unit()
+            if not ok:
+                self.call_from_thread(
+                    status.set_status,
+                    f"  Could not prepare timer unit: {prep_msg}",
+                    "red",
+                )
+                return
             rc2, out = self._systemctl("enable", TIMER_UNIT)
             msg = (
                 "  Rebalancer enabled (starts automatically on login)."

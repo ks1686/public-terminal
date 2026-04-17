@@ -1,17 +1,17 @@
 """Textual modal screens for the Public Terminal TUI."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from public_api_sdk import HistoryRequest, OrderSide
 from rich.text import Text
 from textual import on, work
 from textual.binding import Binding
-from textual.containers import Horizontal, Grid
+from textual.containers import Grid, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Select
-
-from public_api_sdk import HistoryRequest, InstrumentType, OrderSide
 
 from config import _write_env
 
@@ -24,6 +24,7 @@ INSTRUMENT_OPTIONS = [
 # ---------------------------------------------------------------------------
 # First-run setup
 # ---------------------------------------------------------------------------
+
 
 class SetupModal(ModalScreen[bool]):
     """Shown on first launch when credentials are missing. Writes .env on save."""
@@ -79,8 +80,12 @@ class SetupModal(ModalScreen[bool]):
         with Grid(id="setup-dialog"):
             yield Label("WELCOME TO PUBLIC TERMINAL", id="setup-title")
             yield Label(self._INTRO, id="setup-intro")
-            yield Label("API Access Token  (Settings → API → Secret Key)", classes="field-label")
-            yield Input(placeholder="your-access-token", password=True, id="input-token")
+            yield Label(
+                "API Access Token  (Settings → API → Secret Key)", classes="field-label"
+            )
+            yield Input(
+                placeholder="your-access-token", password=True, id="input-token"
+            )
             yield Label("Account Number  (e.g. 5OP95222)", classes="field-label")
             yield Input(placeholder="e.g. 5OP95222", id="input-account")
             yield Label("", id="setup-error")
@@ -94,10 +99,12 @@ class SetupModal(ModalScreen[bool]):
 
     @on(Button.Pressed, "#setup-btn-save")
     def do_save(self) -> None:
-        token   = self.query_one("#input-token",   Input).value.strip()
+        token = self.query_one("#input-token", Input).value.strip()
         account = self.query_one("#input-account", Input).value.strip().upper()
         if not token:
-            self.query_one("#setup-error", Label).update("API access token is required.")
+            self.query_one("#setup-error", Label).update(
+                "API access token is required."
+            )
             self.query_one("#input-token", Input).focus()
             return
         if not account:
@@ -112,6 +119,7 @@ class SetupModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 # Manual order entry
 # ---------------------------------------------------------------------------
+
 
 class OrderModal(ModalScreen[dict | None]):
     """Modal for entering a market buy or sell order."""
@@ -199,22 +207,27 @@ class OrderModal(ModalScreen[dict | None]):
             if qty <= 0:
                 raise ValueError
         except (InvalidOperation, ValueError):
-            self.query_one("#order-error", Label).update("Quantity must be a positive number.")
+            self.query_one("#order-error", Label).update(
+                "Quantity must be a positive number."
+            )
             self.query_one("#input-qty", Input).focus()
             return
         self.query_one("#order-error", Label).update("")
 
-        self.dismiss({
-            "symbol": symbol,
-            "instrument_type": instrument_type_val,
-            "quantity": qty,
-            "side": self._side,
-        })
+        self.dismiss(
+            {
+                "symbol": symbol,
+                "instrument_type": instrument_type_val,
+                "quantity": qty,
+                "side": self._side,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
 # Order cancellation confirmation
 # ---------------------------------------------------------------------------
+
 
 class CancelConfirmModal(ModalScreen[bool]):
     """Confirmation dialog before cancelling an open order."""
@@ -251,7 +264,9 @@ class CancelConfirmModal(ModalScreen[bool]):
     def compose(self):
         with Grid(id="cancel-dialog"):
             yield Label("CANCEL ORDER", id="cancel-title")
-            yield Label(f"Cancel order for [bold]{self._symbol}[/bold]?  (ID: {self._order_id[:8]}…)")
+            yield Label(
+                f"Cancel order for [bold]{self._symbol}[/bold]?  (ID: {self._order_id[:8]}…)"
+            )
             with Horizontal(id="cancel-btn-row"):
                 yield Button("Yes, cancel", variant="error", id="btn-yes")
                 yield Button("No", variant="default", id="btn-no")
@@ -268,6 +283,7 @@ class CancelConfirmModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 # Transaction history
 # ---------------------------------------------------------------------------
+
 
 class HistoryModal(ModalScreen):
     """Scrollable transaction history modal."""
@@ -353,31 +369,41 @@ class HistoryModal(ModalScreen):
             else:
                 truncated = bool(next_token)
 
-            txns = sorted(txns, key=lambda t: t.timestamp, reverse=True)[:self.HISTORY_MAX_TRANSACTIONS]
+            txns = sorted(txns, key=lambda t: t.timestamp, reverse=True)[
+                : self.HISTORY_MAX_TRANSACTIONS
+            ]
             rows = []
             for tx in txns:
                 tx_date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
                 tx_type = tx.type.value if tx.type else "—"
-                symbol  = tx.symbol or "—"
-                side    = tx.side.value if tx.side else "—"
-                qty     = str(tx.quantity) if tx.quantity is not None else "—"
-                net     = f"${tx.net_amount:,.2f}" if tx.net_amount is not None else "—"
+                symbol = tx.symbol or "—"
+                side = tx.side.value if tx.side else "—"
+                qty = str(tx.quantity) if tx.quantity is not None else "—"
+                net = f"${tx.net_amount:,.2f}" if tx.net_amount is not None else "—"
                 side_style = (
-                    "green" if side.upper() == "BUY"  else
-                    "red"   if side.upper() == "SELL" else
-                    "dim"
+                    "green"
+                    if side.upper() == "BUY"
+                    else "red"
+                    if side.upper() == "SELL"
+                    else "dim"
                 )
-                rows.append((tx_date, tx_type, symbol, Text(side, style=side_style), qty, net))
+                rows.append(
+                    (tx_date, tx_type, symbol, Text(side, style=side_style), qty, net)
+                )
 
             def _populate() -> None:
                 for row in rows:
                     tbl.add_row(*row)
                 suffix = " (truncated)" if truncated else ""
-                status.update(f"{len(rows)} transactions{suffix} (newest first, last 90 days)  |  ESC or [h] to close")
+                status.update(
+                    f"{len(rows)} transactions{suffix} (newest first, last 90 days)  |  ESC or [h] to close"
+                )
 
             self.app.call_from_thread(_populate)
         except Exception as exc:
-            self.app.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
+            self.app.call_from_thread(
+                status.update, f"[red]Error loading history: {exc}[/red]"
+            )
 
     def action_dismiss_modal(self) -> None:
         self.dismiss()
@@ -390,6 +416,7 @@ class HistoryModal(ModalScreen):
 # ---------------------------------------------------------------------------
 # Run-now confirmation
 # ---------------------------------------------------------------------------
+
 
 class RunNowModal(ModalScreen[bool]):
     """Confirmation before triggering an immediate rebalance."""
@@ -421,7 +448,9 @@ class RunNowModal(ModalScreen[bool]):
     def compose(self):
         with Grid(id="run-dialog"):
             yield Label("RUN REBALANCER NOW", id="run-title")
-            yield Label("This will immediately place market orders to\nrebalance your portfolio. Proceed?")
+            yield Label(
+                "This will immediately place market orders to\nrebalance your portfolio. Proceed?"
+            )
             with Horizontal(id="run-btn-row"):
                 yield Button("Run Now", variant="warning", id="btn-run")
                 yield Button("Cancel", variant="default", id="btn-cancel")
@@ -438,6 +467,7 @@ class RunNowModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 # Rebalance settings
 # ---------------------------------------------------------------------------
+
 
 class RebalanceConfigModal(ModalScreen):
     """Modal for configuring the rebalancer."""
@@ -491,7 +521,13 @@ class RebalanceConfigModal(ModalScreen):
     }
     """
 
-    _ALLOC_INPUTS = ("input-stocks", "input-btc", "input-eth", "input-gold", "input-cash")
+    _ALLOC_INPUTS = (
+        "input-stocks",
+        "input-btc",
+        "input-eth",
+        "input-gold",
+        "input-cash",
+    )
     _ALLOC_LABELS = {
         "stocks": "Stocks %",
         "btc": "Bitcoin %",
@@ -509,43 +545,74 @@ class RebalanceConfigModal(ModalScreen):
         current_allocs: dict[str, float],
     ) -> None:
         super().__init__()
-        self._current_index      = current_index
-        self._current_top_n      = current_top_n
+        self._current_index = current_index
+        self._current_top_n = current_top_n
         self._current_margin_pct = current_margin_pct
-        self._current_excluded   = current_excluded
-        self._current_allocs     = current_allocs
+        self._current_excluded = current_excluded
+        self._current_allocs = current_allocs
 
     def compose(self):
         from rebalance import SUPPORTED_INDEXES
+
         a = self._current_allocs
-        excluded_str  = ", ".join(sorted(self._current_excluded))
+        excluded_str = ", ".join(sorted(self._current_excluded))
         index_options = [(label, key) for key, label in SUPPORTED_INDEXES.items()]
         with Grid(id="cfg-dialog"):
             yield Label("REBALANCE SETTINGS", id="cfg-title")
 
-            yield Label("─── Index & Stocks ───────────────────────────────────", id="cfg-section-index")
+            yield Label(
+                "─── Index & Stocks ───────────────────────────────────",
+                id="cfg-section-index",
+            )
             yield Label("Index to track", classes="field-label")
             yield Select(index_options, value=self._current_index, id="select-index")
-            yield Label("Top N stocks by market cap  (default: full index)", classes="field-label")
+            yield Label(
+                "Top N stocks by market cap  (default: full index)",
+                classes="field-label",
+            )
             yield Input(value=str(self._current_top_n), id="input-top-n")
-            yield Label("Excluded tickers  (comma-separated, leave blank for none)", classes="field-label")
-            yield Input(value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded")
+            yield Label(
+                "Excluded tickers  (comma-separated, leave blank for none)",
+                classes="field-label",
+            )
+            yield Input(
+                value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded"
+            )
 
-            yield Label("─── Margin ───────────────────────────────────────────", id="cfg-section-margin")
-            yield Label("Margin usage  (0.0 = cash only · 0.5 = 50% of margin · 1.0 = full)", classes="field-label")
+            yield Label(
+                "─── Margin ───────────────────────────────────────────",
+                id="cfg-section-margin",
+            )
+            yield Label(
+                "Margin usage  (0.0 = cash only · 0.5 = 50% of margin · 1.0 = full)",
+                classes="field-label",
+            )
             yield Input(value=str(self._current_margin_pct), id="input-margin")
 
-            yield Label("─── Target Allocation (must sum to 100%) ─────────────", id="cfg-section-alloc")
-            yield Label("Stocks %", classes="field-label")
-            yield Input(value=str(round(a.get("stocks", 0.65) * 100)), id="input-stocks")
+            yield Label(
+                "─── Target Allocation (must sum to 100%) ─────────────",
+                id="cfg-section-alloc",
+            )
+            yield Label(
+                "These percentages are target portfolio weights for each bucket.",
+                classes="field-label",
+            )
+            yield Label(
+                "Stocks = Top N index basket | BTC = Bitcoin | ETH = Ethereum | Gold = GLDM ETF | Cash = left uninvested",
+                classes="field-label",
+            )
+            yield Label("Stocks % (Top N index basket)", classes="field-label")
+            yield Input(
+                value=str(round(a.get("stocks", 0.65) * 100)), id="input-stocks"
+            )
             yield Label("Bitcoin (BTC) %", classes="field-label")
-            yield Input(value=str(round(a.get("btc",    0.15) * 100)), id="input-btc")
+            yield Input(value=str(round(a.get("btc", 0.15) * 100)), id="input-btc")
             yield Label("Ethereum (ETH) %", classes="field-label")
-            yield Input(value=str(round(a.get("eth",    0.05) * 100)), id="input-eth")
-            yield Label("Gold (GLDM) %", classes="field-label")
-            yield Input(value=str(round(a.get("gold",   0.10) * 100)), id="input-gold")
+            yield Input(value=str(round(a.get("eth", 0.05) * 100)), id="input-eth")
+            yield Label("Gold (GLDM ETF) %", classes="field-label")
+            yield Input(value=str(round(a.get("gold", 0.10) * 100)), id="input-gold")
             yield Label("Cash (uninvested buying power) %", classes="field-label")
-            yield Input(value=str(round(a.get("cash",   0.05) * 100)), id="input-cash")
+            yield Input(value=str(round(a.get("cash", 0.05) * 100)), id="input-cash")
             yield Label("", id="alloc-sum")
             yield Label("", id="cfg-error")
 
@@ -566,10 +633,18 @@ class RebalanceConfigModal(ModalScreen):
                 value = Decimal(raw)
             except InvalidOperation:
                 values[key] = 0
-                return values, sum(values.values()), f"{label} must be a whole number like 65."
+                return (
+                    values,
+                    sum(values.values()),
+                    f"{label} must be a whole number like 65.",
+                )
             if not value.is_finite() or value < 0 or value != value.to_integral_value():
                 values[key] = 0
-                return values, sum(values.values()), f"{label} must be a whole number like 65."
+                return (
+                    values,
+                    sum(values.values()),
+                    f"{label} must be a whole number like 65.",
+                )
             values[key] = int(value)
         return values, sum(values.values()), None
 
@@ -597,8 +672,8 @@ class RebalanceConfigModal(ModalScreen):
 
     @on(Button.Pressed, "#cfg-btn-save")
     def save(self) -> None:
-        index     = self.query_one("#select-index", Select).value
-        top_n_str = self.query_one("#input-top-n",  Input).value.strip()
+        index = self.query_one("#select-index", Select).value
+        top_n_str = self.query_one("#input-top-n", Input).value.strip()
         margin_str = self.query_one("#input-margin", Input).value.strip()
         excluded_raw = self.query_one("#input-excluded", Input).value
         try:
@@ -606,7 +681,9 @@ class RebalanceConfigModal(ModalScreen):
             if top_n < 1:
                 raise ValueError
         except ValueError:
-            self.query_one("#cfg-error", Label).update("Top N must be a whole number ≥ 1.")
+            self.query_one("#cfg-error", Label).update(
+                "Top N must be a whole number ≥ 1."
+            )
             self.query_one("#input-top-n", Input).focus()
             return
         try:
@@ -614,7 +691,9 @@ class RebalanceConfigModal(ModalScreen):
             if not 0.0 <= margin_pct <= 1.0:
                 raise ValueError
         except ValueError:
-            self.query_one("#cfg-error", Label).update("Margin must be a number between 0.0 and 1.0.")
+            self.query_one("#cfg-error", Label).update(
+                "Margin must be a number between 0.0 and 1.0."
+            )
             self.query_one("#input-margin", Input).focus()
             return
         alloc_pcts, total, alloc_error = self._parse_alloc_inputs()
@@ -623,20 +702,26 @@ class RebalanceConfigModal(ModalScreen):
             self.query_one("#input-stocks", Input).focus()
             return
         if any(v < 0 or v > 100 for v in alloc_pcts.values()):
-            self.query_one("#cfg-error", Label).update("Each allocation percentage must be between 0 and 100.")
+            self.query_one("#cfg-error", Label).update(
+                "Each allocation percentage must be between 0 and 100."
+            )
             self.query_one("#input-stocks", Input).focus()
             return
         if total != 100:
-            self.query_one("#cfg-error", Label).update(f"Allocations sum to {total}% — must equal 100%.")
+            self.query_one("#cfg-error", Label).update(
+                f"Allocations sum to {total}% — must equal 100%."
+            )
             self.query_one("#input-stocks", Input).focus()
             return
         self.query_one("#cfg-error", Label).update("")
         allocations = {k: round(v / 100, 4) for k, v in alloc_pcts.items()}
         excluded = [t.upper().strip() for t in excluded_raw.split(",") if t.strip()]
-        self.dismiss({
-            "index": index,
-            "top_n": top_n,
-            "margin_usage_pct": margin_pct,
-            "excluded_tickers": excluded,
-            "allocations": allocations,
-        })
+        self.dismiss(
+            {
+                "index": index,
+                "top_n": top_n,
+                "margin_usage_pct": margin_pct,
+                "excluded_tickers": excluded,
+                "allocations": allocations,
+            }
+        )

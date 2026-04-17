@@ -407,24 +407,25 @@ class HistoryModal(ModalScreen):
         try:
             start = datetime.now(timezone.utc) - timedelta(days=90)
             page = self._client.get_history(history_request=HistoryRequest(start=start, page_size=100))
+            txns = sorted(page.transactions, key=lambda t: t.timestamp, reverse=True)
             rows = []
-            for tx in page.transactions:
-                date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
+            for tx in txns:
+                tx_date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
                 tx_type = tx.type.value if tx.type else "—"
                 symbol = tx.symbol or "—"
                 side = tx.side.value if tx.side else "—"
                 qty = str(tx.quantity) if tx.quantity is not None else "—"
                 net = f"${tx.net_amount:,.2f}" if tx.net_amount is not None else "—"
                 side_style = (
-                    "green" if side.upper() in ("BUY", "DEBIT") else
-                    "red"   if side.upper() in ("SELL", "CREDIT") else
+                    "green" if side.upper() in ("BUY",) else
+                    "red"   if side.upper() in ("SELL",) else
                     "dim"
                 )
-                rows.append((date, tx_type, symbol, Text(side, style=side_style), qty, net))
+                rows.append((tx_date, tx_type, symbol, Text(side, style=side_style), qty, net))
             def _populate():
                 for row in rows:
                     tbl.add_row(*row)
-                status.update(f"{len(rows)} transactions (last 90 days)  |  ESC or [h] to close")
+                status.update(f"{len(rows)} transactions (newest first, last 90 days)  |  ESC or [h] to close")
             self.app.call_from_thread(_populate)
         except Exception as exc:
             self.app.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
@@ -722,7 +723,7 @@ class RebalancerBar(Static):
             t.append("○ INACTIVE", style="red")
         t.append("  ", style="dim")
         if enabled is None:
-            pass
+            t.append("—", style="dim")
         elif enabled:
             t.append("ENABLED", style="cyan")
         else:

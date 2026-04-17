@@ -1,0 +1,642 @@
+"""Textual modal screens for the Public Terminal TUI."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+
+from rich.text import Text
+from textual import on, work
+from textual.binding import Binding
+from textual.containers import Horizontal, Grid
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Input, Label, Select
+
+from public_api_sdk import HistoryRequest, InstrumentType, OrderSide
+
+from config import _write_env
+
+INSTRUMENT_OPTIONS = [
+    ("Equity / ETF / Stock", "EQUITY"),
+    ("Crypto", "CRYPTO"),
+]
+
+
+# ---------------------------------------------------------------------------
+# First-run setup
+# ---------------------------------------------------------------------------
+
+class SetupModal(ModalScreen[bool]):
+    """Shown on first launch when credentials are missing. Writes .env on save."""
+
+    DEFAULT_CSS = """
+    SetupModal {
+        align: center middle;
+    }
+    #setup-dialog {
+        width: 72;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #setup-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+        color: $warning;
+    }
+    #setup-intro {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #setup-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #setup-error {
+        height: 1;
+        margin-top: 1;
+        color: $error;
+    }
+    #setup-btn-save {
+        margin-right: 2;
+    }
+    """
+
+    _INTRO = (
+        "No credentials found. Enter your Public.com API details below.\n"
+        "They will be saved to .env in the project directory."
+    )
+
+    def compose(self):
+        with Grid(id="setup-dialog"):
+            yield Label("WELCOME TO PUBLIC TERMINAL", id="setup-title")
+            yield Label(self._INTRO, id="setup-intro")
+            yield Label("API Access Token  (Settings → API → Secret Key)", classes="field-label")
+            yield Input(placeholder="your-access-token", password=True, id="input-token")
+            yield Label("Account Number  (e.g. 5OP95222)", classes="field-label")
+            yield Input(placeholder="e.g. 5OP95222", id="input-account")
+            yield Label("", id="setup-error")
+            with Horizontal(id="setup-btn-row"):
+                yield Button("Save & Continue", variant="success", id="setup-btn-save")
+                yield Button("Quit", variant="error", id="setup-btn-quit")
+
+    @on(Button.Pressed, "#setup-btn-quit")
+    def do_quit(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#setup-btn-save")
+    def do_save(self) -> None:
+        token   = self.query_one("#input-token",   Input).value.strip()
+        account = self.query_one("#input-account", Input).value.strip().upper()
+        if not token:
+            self.query_one("#setup-error", Label).update("API access token is required.")
+            self.query_one("#input-token", Input).focus()
+            return
+        if not account:
+            self.query_one("#setup-error", Label).update("Account number is required.")
+            self.query_one("#input-account", Input).focus()
+            return
+        self.query_one("#setup-error", Label).update("")
+        _write_env(token, account)
+        self.dismiss(True)
+
+
+# ---------------------------------------------------------------------------
+# Manual order entry
+# ---------------------------------------------------------------------------
+
+class OrderModal(ModalScreen[dict | None]):
+    """Modal for entering a market buy or sell order."""
+
+    DEFAULT_CSS = """
+    OrderModal {
+        align: center middle;
+    }
+    #dialog {
+        width: 60;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #dialog-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #order-error {
+        height: 1;
+        margin-top: 1;
+        color: $error;
+    }
+    #btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #btn-confirm {
+        margin-right: 2;
+    }
+    """
+
+    def __init__(self, side: OrderSide) -> None:
+        super().__init__()
+        self._side = side
+
+    def compose(self):
+        title = f"MARKET {self._side.value}"
+        with Grid(id="dialog"):
+            yield Label(title, id="dialog-title")
+            yield Label("Symbol", classes="field-label")
+            yield Input(placeholder="e.g. AAPL, BTC", id="input-symbol")
+            yield Label("Instrument type", classes="field-label")
+            yield Select(
+                [(label, val) for label, val in INSTRUMENT_OPTIONS],
+                value="EQUITY",
+                id="select-type",
+            )
+            yield Label("Quantity (shares / units)", classes="field-label")
+            yield Input(placeholder="e.g. 10 or 0.5", id="input-qty")
+            yield Label("", id="order-error")
+            with Horizontal(id="btn-row"):
+                yield Button(
+                    f"Confirm {self._side.value}",
+                    variant="success" if self._side == OrderSide.BUY else "error",
+                    id="btn-confirm",
+                )
+                yield Button("Cancel", variant="default", id="btn-cancel")
+
+    @on(Button.Pressed, "#btn-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#btn-confirm")
+    def confirm(self) -> None:
+        symbol = self.query_one("#input-symbol", Input).value.strip().upper()
+        instrument_type_val = self.query_one("#select-type", Select).value
+        qty_str = self.query_one("#input-qty", Input).value.strip()
+
+        if not symbol:
+            self.query_one("#order-error", Label).update("Symbol is required.")
+            self.query_one("#input-symbol", Input).focus()
+            return
+        try:
+            qty = Decimal(qty_str)
+            if qty <= 0:
+                raise ValueError
+        except (InvalidOperation, ValueError):
+            self.query_one("#order-error", Label).update("Quantity must be a positive number.")
+            self.query_one("#input-qty", Input).focus()
+            return
+        self.query_one("#order-error", Label).update("")
+
+        self.dismiss({
+            "symbol": symbol,
+            "instrument_type": instrument_type_val,
+            "quantity": qty,
+            "side": self._side,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Order cancellation confirmation
+# ---------------------------------------------------------------------------
+
+class CancelConfirmModal(ModalScreen[bool]):
+    """Confirmation dialog before cancelling an open order."""
+
+    DEFAULT_CSS = """
+    CancelConfirmModal {
+        align: center middle;
+    }
+    #cancel-dialog {
+        width: 50;
+        height: auto;
+        border: thick $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    #cancel-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #cancel-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, order_id: str, symbol: str) -> None:
+        super().__init__()
+        self._order_id = order_id
+        self._symbol = symbol
+
+    def compose(self):
+        with Grid(id="cancel-dialog"):
+            yield Label("CANCEL ORDER", id="cancel-title")
+            yield Label(f"Cancel order for [bold]{self._symbol}[/bold]?  (ID: {self._order_id[:8]}…)")
+            with Horizontal(id="cancel-btn-row"):
+                yield Button("Yes, cancel", variant="error", id="btn-yes")
+                yield Button("No", variant="default", id="btn-no")
+
+    @on(Button.Pressed, "#btn-yes")
+    def yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn-no")
+    def no(self) -> None:
+        self.dismiss(False)
+
+
+# ---------------------------------------------------------------------------
+# Transaction history
+# ---------------------------------------------------------------------------
+
+class HistoryModal(ModalScreen):
+    """Scrollable transaction history modal."""
+
+    BINDINGS = [Binding("escape,h", "dismiss_modal", "Close", show=False)]
+    HISTORY_PAGE_SIZE = 100
+    HISTORY_MAX_PAGES = 20
+    HISTORY_MAX_TRANSACTIONS = 1000
+
+    DEFAULT_CSS = """
+    HistoryModal {
+        align: center middle;
+    }
+    #hist-dialog {
+        width: 96;
+        height: 36;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #hist-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #hist-table {
+        height: 1fr;
+    }
+    #hist-status {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #hist-btn-row {
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, client) -> None:
+        super().__init__()
+        self._client = client
+
+    def compose(self):
+        with Grid(id="hist-dialog"):
+            yield Label("TRANSACTION HISTORY", id="hist-title")
+            yield DataTable(id="hist-table")
+            yield Label("Loading…", id="hist-status")
+            with Horizontal(id="hist-btn-row"):
+                yield Button("Close", variant="default", id="btn-close")
+
+    def on_mount(self) -> None:
+        tbl = self.query_one("#hist-table", DataTable)
+        tbl.add_columns("DATE", "TYPE", "SYMBOL", "SIDE", "QTY", "NET")
+        tbl.cursor_type = "row"
+        self._load_history()
+
+    @work(thread=True)
+    def _load_history(self) -> None:
+        status = self.query_one("#hist-status", Label)
+        tbl = self.query_one("#hist-table", DataTable)
+        try:
+            start = datetime.now(timezone.utc) - timedelta(days=90)
+            txns = []
+            next_token = None
+            truncated = False
+            for _ in range(self.HISTORY_MAX_PAGES):
+                page = self._client.get_history(
+                    history_request=HistoryRequest(
+                        start=start,
+                        page_size=self.HISTORY_PAGE_SIZE,
+                        next_token=next_token,
+                    )
+                )
+                txns.extend(page.transactions or [])
+                next_token = getattr(page, "next_token", None)
+                if not next_token:
+                    break
+                if len(txns) >= self.HISTORY_MAX_TRANSACTIONS:
+                    truncated = True
+                    break
+            else:
+                truncated = bool(next_token)
+
+            txns = sorted(txns, key=lambda t: t.timestamp, reverse=True)[:self.HISTORY_MAX_TRANSACTIONS]
+            rows = []
+            for tx in txns:
+                tx_date = tx.timestamp.strftime("%Y-%m-%d %H:%M")
+                tx_type = tx.type.value if tx.type else "—"
+                symbol  = tx.symbol or "—"
+                side    = tx.side.value if tx.side else "—"
+                qty     = str(tx.quantity) if tx.quantity is not None else "—"
+                net     = f"${tx.net_amount:,.2f}" if tx.net_amount is not None else "—"
+                side_style = (
+                    "green" if side.upper() == "BUY"  else
+                    "red"   if side.upper() == "SELL" else
+                    "dim"
+                )
+                rows.append((tx_date, tx_type, symbol, Text(side, style=side_style), qty, net))
+
+            def _populate() -> None:
+                for row in rows:
+                    tbl.add_row(*row)
+                suffix = " (truncated)" if truncated else ""
+                status.update(f"{len(rows)} transactions{suffix} (newest first, last 90 days)  |  ESC or [h] to close")
+
+            self.app.call_from_thread(_populate)
+        except Exception as exc:
+            self.app.call_from_thread(status.update, f"[red]Error loading history: {exc}[/red]")
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss()
+
+    @on(Button.Pressed, "#btn-close")
+    def close(self) -> None:
+        self.dismiss()
+
+
+# ---------------------------------------------------------------------------
+# Run-now confirmation
+# ---------------------------------------------------------------------------
+
+class RunNowModal(ModalScreen[bool]):
+    """Confirmation before triggering an immediate rebalance."""
+
+    DEFAULT_CSS = """
+    RunNowModal {
+        align: center middle;
+    }
+    #run-dialog {
+        width: 54;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #run-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #run-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def compose(self):
+        with Grid(id="run-dialog"):
+            yield Label("RUN REBALANCER NOW", id="run-title")
+            yield Label("This will immediately place market orders to\nrebalance your portfolio. Proceed?")
+            with Horizontal(id="run-btn-row"):
+                yield Button("Run Now", variant="warning", id="btn-run")
+                yield Button("Cancel", variant="default", id="btn-cancel")
+
+    @on(Button.Pressed, "#btn-run")
+    def run(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn-cancel")
+    def cancel(self) -> None:
+        self.dismiss(False)
+
+
+# ---------------------------------------------------------------------------
+# Rebalance settings
+# ---------------------------------------------------------------------------
+
+class RebalanceConfigModal(ModalScreen):
+    """Modal for configuring the rebalancer."""
+
+    DEFAULT_CSS = """
+    RebalanceConfigModal {
+        align: center middle;
+    }
+    #cfg-dialog {
+        width: 72;
+        height: auto;
+        max-height: 90vh;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+    #cfg-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #cfg-section-index, #cfg-section-margin, #cfg-section-alloc {
+        text-style: bold;
+        margin-top: 1;
+        color: $primary;
+        height: 1;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #alloc-sum {
+        height: 1;
+        margin-top: 1;
+    }
+    #cfg-error {
+        height: 1;
+        margin-top: 1;
+        color: $error;
+    }
+    #cfg-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #cfg-btn-save {
+        margin-right: 2;
+    }
+    """
+
+    _ALLOC_INPUTS = ("input-stocks", "input-btc", "input-eth", "input-gold", "input-cash")
+    _ALLOC_LABELS = {
+        "stocks": "Stocks %",
+        "btc": "Bitcoin %",
+        "eth": "Ethereum %",
+        "gold": "Gold %",
+        "cash": "Cash %",
+    }
+
+    def __init__(
+        self,
+        current_index: str,
+        current_top_n: int,
+        current_margin_pct: float,
+        current_excluded: list[str],
+        current_allocs: dict[str, float],
+    ) -> None:
+        super().__init__()
+        self._current_index      = current_index
+        self._current_top_n      = current_top_n
+        self._current_margin_pct = current_margin_pct
+        self._current_excluded   = current_excluded
+        self._current_allocs     = current_allocs
+
+    def compose(self):
+        from rebalance import SUPPORTED_INDEXES
+        a = self._current_allocs
+        excluded_str  = ", ".join(sorted(self._current_excluded))
+        index_options = [(label, key) for key, label in SUPPORTED_INDEXES.items()]
+        with Grid(id="cfg-dialog"):
+            yield Label("REBALANCE SETTINGS", id="cfg-title")
+
+            yield Label("─── Index & Stocks ───────────────────────────────────", id="cfg-section-index")
+            yield Label("Index to track", classes="field-label")
+            yield Select(index_options, value=self._current_index, id="select-index")
+            yield Label("Top N stocks by market cap  (default: full index)", classes="field-label")
+            yield Input(value=str(self._current_top_n), id="input-top-n")
+            yield Label("Excluded tickers  (comma-separated, leave blank for none)", classes="field-label")
+            yield Input(value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded")
+
+            yield Label("─── Margin ───────────────────────────────────────────", id="cfg-section-margin")
+            yield Label("Margin usage  (0.0 = cash only · 0.5 = 50% of margin · 1.0 = full)", classes="field-label")
+            yield Input(value=str(self._current_margin_pct), id="input-margin")
+
+            yield Label("─── Target Allocation (must sum to 100%) ─────────────", id="cfg-section-alloc")
+            yield Label("Stocks %", classes="field-label")
+            yield Input(value=str(round(a.get("stocks", 0.65) * 100)), id="input-stocks")
+            yield Label("Bitcoin (BTC) %", classes="field-label")
+            yield Input(value=str(round(a.get("btc",    0.15) * 100)), id="input-btc")
+            yield Label("Ethereum (ETH) %", classes="field-label")
+            yield Input(value=str(round(a.get("eth",    0.05) * 100)), id="input-eth")
+            yield Label("Gold (GLDM) %", classes="field-label")
+            yield Input(value=str(round(a.get("gold",   0.10) * 100)), id="input-gold")
+            yield Label("Cash (uninvested buying power) %", classes="field-label")
+            yield Input(value=str(round(a.get("cash",   0.05) * 100)), id="input-cash")
+            yield Label("", id="alloc-sum")
+            yield Label("", id="cfg-error")
+
+            with Horizontal(id="cfg-btn-row"):
+                yield Button("Save", variant="success", id="cfg-btn-save")
+                yield Button("Cancel", variant="default", id="cfg-btn-cancel")
+
+    def on_mount(self) -> None:
+        self._update_sum()
+
+    def _parse_alloc_inputs(self) -> tuple[dict[str, int], int, str | None]:
+        values: dict[str, int] = {}
+        for input_id in self._ALLOC_INPUTS:
+            key = input_id.removeprefix("input-")
+            raw = self.query_one(f"#{input_id}", Input).value.strip()
+            label = self._ALLOC_LABELS[key]
+            try:
+                value = Decimal(raw)
+            except InvalidOperation:
+                values[key] = 0
+                return values, sum(values.values()), f"{label} must be a whole number like 65."
+            if not value.is_finite() or value < 0 or value != value.to_integral_value():
+                values[key] = 0
+                return values, sum(values.values()), f"{label} must be a whole number like 65."
+            values[key] = int(value)
+        return values, sum(values.values()), None
+
+    def _update_sum(self) -> None:
+        _, total, error = self._parse_alloc_inputs()
+        label = self.query_one("#alloc-sum", Label)
+        if error:
+            label.update(f"  {error}")
+            label.styles.color = "red"
+        elif total == 100:
+            label.update(f"  Total: {total}%  ✓")
+            label.styles.color = "green"
+        else:
+            label.update(f"  Total: {total}%  — must equal 100%")
+            label.styles.color = "red"
+
+    @on(Input.Changed)
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id in self._ALLOC_INPUTS:
+            self._update_sum()
+
+    @on(Button.Pressed, "#cfg-btn-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#cfg-btn-save")
+    def save(self) -> None:
+        index     = self.query_one("#select-index", Select).value
+        top_n_str = self.query_one("#input-top-n",  Input).value.strip()
+        margin_str = self.query_one("#input-margin", Input).value.strip()
+        excluded_raw = self.query_one("#input-excluded", Input).value
+        try:
+            top_n = int(top_n_str)
+            if top_n < 1:
+                raise ValueError
+        except ValueError:
+            self.query_one("#cfg-error", Label).update("Top N must be a whole number ≥ 1.")
+            self.query_one("#input-top-n", Input).focus()
+            return
+        try:
+            margin_pct = float(margin_str)
+            if not 0.0 <= margin_pct <= 1.0:
+                raise ValueError
+        except ValueError:
+            self.query_one("#cfg-error", Label).update("Margin must be a number between 0.0 and 1.0.")
+            self.query_one("#input-margin", Input).focus()
+            return
+        alloc_pcts, total, alloc_error = self._parse_alloc_inputs()
+        if alloc_error:
+            self.query_one("#cfg-error", Label).update(alloc_error)
+            self.query_one("#input-stocks", Input).focus()
+            return
+        if any(v < 0 or v > 100 for v in alloc_pcts.values()):
+            self.query_one("#cfg-error", Label).update("Each allocation percentage must be between 0 and 100.")
+            self.query_one("#input-stocks", Input).focus()
+            return
+        if total != 100:
+            self.query_one("#cfg-error", Label).update(f"Allocations sum to {total}% — must equal 100%.")
+            self.query_one("#input-stocks", Input).focus()
+            return
+        self.query_one("#cfg-error", Label).update("")
+        allocations = {k: round(v / 100, 4) for k, v in alloc_pcts.items()}
+        excluded = [t.upper().strip() for t in excluded_raw.split(",") if t.strip()]
+        self.dismiss({
+            "index": index,
+            "top_n": top_n,
+            "margin_usage_pct": margin_pct,
+            "excluded_tickers": excluded,
+            "allocations": allocations,
+        })

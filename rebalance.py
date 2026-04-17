@@ -23,23 +23,33 @@ import time
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from datetime import date, datetime, timedelta
-from decimal import Decimal
-from pathlib import Path
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import yfinance as yf
-
-from client import get_client
 from public_api_sdk import (
     InstrumentType,
     OrderExpirationRequest,
     OrderInstrument,
     OrderRequest,
     OrderSide,
-    OrderStatus,
     OrderType,
     TimeInForce,
+)
+
+from client import get_client
+from config import (
+    _ACTIVE_ORDER_STATUSES,
+    BROKER_TO_YF_SYMBOLS,
+    CACHE_DIR,
+    MARKET_CAP_CACHE_FILE,
+    REBALANCE_CONFIG_FILE,
+    REBALANCE_LOG_FILE,
+    SKIP_FILE,
+    TODAY_BUYS_FILE,
+    YF_TO_BROKER_SYMBOLS,
 )
 
 # ---------------------------------------------------------------------------
@@ -49,48 +59,42 @@ from public_api_sdk import (
 # Default allocations — overridden at runtime by load_allocation_config()
 _DEFAULT_ALLOCS: dict[str, Decimal] = {
     "stocks": Decimal("0.65"),  # index stocks, market-cap weighted
-    "btc":    Decimal("0.15"),  # Bitcoin
-    "eth":    Decimal("0.05"),  # Ethereum
-    "gold":   Decimal("0.10"),  # GLDM ETF
-    "cash":   Decimal("0.05"),  # uninvested cash (no orders placed)
+    "btc": Decimal("0.15"),  # Bitcoin
+    "eth": Decimal("0.05"),  # Ethereum
+    "gold": Decimal("0.10"),  # GLDM ETF
+    "cash": Decimal("0.05"),  # uninvested cash (no orders placed)
 }
 # Keep module-level names for use outside rebalance() (dry-run scripts, etc.)
 ALLOC_STOCKS = _DEFAULT_ALLOCS["stocks"]
-ALLOC_BTC    = _DEFAULT_ALLOCS["btc"]
-ALLOC_ETH    = _DEFAULT_ALLOCS["eth"]
-ALLOC_GOLD   = _DEFAULT_ALLOCS["gold"]
+ALLOC_BTC = _DEFAULT_ALLOCS["btc"]
+ALLOC_ETH = _DEFAULT_ALLOCS["eth"]
+ALLOC_GOLD = _DEFAULT_ALLOCS["gold"]
 
-SP500_TOP_N     = 500               # default: full index (capped by actual constituent count)
-GOLD_SYMBOL     = "GLDM"
-BTC_SYMBOL      = "BTC"
-ETH_SYMBOL      = "ETH"
-NON_STOCK_ETFS  = {GOLD_SYMBOL}     # equity symbols excluded from the S&P 500 slice
-BROKER_TO_YF_SYMBOLS = {
-    "BF.B": "BF-B",
-    "BRK.B": "BRK-B",
-}
-YF_TO_BROKER_SYMBOLS = {yf_symbol: broker_symbol for broker_symbol, yf_symbol in BROKER_TO_YF_SYMBOLS.items()}
+SP500_TOP_N = 500  # default: full index (capped by actual constituent count)
+GOLD_SYMBOL = "GLDM"
+BTC_SYMBOL = "BTC"
+ETH_SYMBOL = "ETH"
+NON_STOCK_ETFS = {GOLD_SYMBOL}  # equity symbols excluded from the stock index slice
 
 # ---------------------------------------------------------------------------
 # Operational config
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).parent
-CACHE_DIR    = PROJECT_ROOT / "cache"
-MARKET_CAP_CACHE_FILE  = CACHE_DIR / "market_caps.json"
-LOG_FILE               = CACHE_DIR / "rebalance.log"
-SKIP_FILE              = CACHE_DIR / "skip_next_rebalance"
-CONFIG_FILE            = PROJECT_ROOT / "rebalance_config.json"
-TODAY_BUYS_FILE        = CACHE_DIR / "today_buys.json"
+MARKET_CAP_CACHE_MAX_AGE_HOURS = 20  # same-day cache; refresh each noon run
+MARKET_CAP_FETCH_WORKERS = 20  # parallel threads for fast_info calls
+MARKET_CAP_FETCH_TIMEOUT_SECONDS = (
+    300  # hard wall-clock deadline for all workers combined
+)
+YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
+CRYPTO_PRICE_FETCH_TIMEOUT_SECONDS = YFINANCE_DOWNLOAD_TIMEOUT_SECONDS * 2
 
-MARKET_CAP_CACHE_MAX_AGE_HOURS = 20   # same-day cache; refresh each noon run
-MARKET_CAP_FETCH_WORKERS       = 20   # parallel threads for fast_info calls
-
-MIN_ORDER_DOLLARS         = Decimal("1.00")   # ignore equity orders smaller than $1
-MIN_CRYPTO_ORDER_DOLLARS  = Decimal("1.00")   # minimum notional for any crypto order
-REBALANCE_THRESHOLD_PCT   = Decimal("0.005")  # only act if drift > 0.5% of target
-BUYING_POWER_BUFFER       = Decimal("1.00")   # leave a small cushion to avoid broker-side shortfall errors
-SELL_WAIT_TIMEOUT_SECONDS = 300               # wait up to 5 minutes for sell orders to clear
+MIN_ORDER_DOLLARS = Decimal("1.00")  # ignore equity orders smaller than $1
+MIN_CRYPTO_ORDER_DOLLARS = Decimal("1.00")  # minimum notional for any crypto order
+REBALANCE_THRESHOLD_PCT = Decimal("0.005")  # only act if drift > 0.5% of target
+BUYING_POWER_BUFFER = Decimal(
+    "1.00"
+)  # leave a small cushion to avoid broker-side shortfall errors
+SELL_WAIT_TIMEOUT_SECONDS = 300  # wait up to 5 minutes for sell orders to clear
 ORDER_STATUS_POLL_SECONDS = 2.0
 
 # ---------------------------------------------------------------------------
@@ -105,46 +109,53 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE),
+        logging.FileHandler(REBALANCE_LOG_FILE),
     ],
 )
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rebalance config (ETF ticker + top N), read at runtime
+# Rebalance config (index + top N), read at runtime
 # ---------------------------------------------------------------------------
 
 # Canonical index identifiers used in rebalance_config.json
-_INDEX_SP500    = "SP500"
+_INDEX_SP500 = "SP500"
 _INDEX_NASDAQ100 = "NASDAQ100"
-_INDEX_DJIA     = "DJIA"
+_INDEX_DJIA = "DJIA"
 
 # Legacy ETF ticker → index name (for migrating old configs)
 _ETF_TO_INDEX: dict[str, str] = {
-    "SPY": _INDEX_SP500, "VOO": _INDEX_SP500, "IVV": _INDEX_SP500,
-    "SPLG": _INDEX_SP500, "CSPX": _INDEX_SP500,
-    "QQQ": _INDEX_NASDAQ100, "QQQM": _INDEX_NASDAQ100, "ONEQ": _INDEX_NASDAQ100,
+    "SPY": _INDEX_SP500,
+    "VOO": _INDEX_SP500,
+    "IVV": _INDEX_SP500,
+    "SPLG": _INDEX_SP500,
+    "CSPX": _INDEX_SP500,
+    "QQQ": _INDEX_NASDAQ100,
+    "QQQM": _INDEX_NASDAQ100,
+    "ONEQ": _INDEX_NASDAQ100,
     "DIA": _INDEX_DJIA,
 }
 
 
 SUPPORTED_INDEXES: dict[str, str] = {
-    _INDEX_SP500:    "S&P 500",
+    _INDEX_SP500: "S&P 500",
     _INDEX_NASDAQ100: "NASDAQ-100",
-    _INDEX_DJIA:     "Dow Jones (DJIA)",
+    _INDEX_DJIA: "Dow Jones (DJIA)",
 }
 
 
 def _load_config_json() -> dict:
     """Load rebalance_config.json once; returns {} on any error."""
     try:
-        return json.loads(CONFIG_FILE.read_text())
+        return json.loads(REBALANCE_CONFIG_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
-def load_rebalance_config(_cfg: dict | None = None) -> tuple[str, int, Decimal, frozenset[str]]:
+def load_rebalance_config(
+    _cfg: dict | None = None,
+) -> tuple[str, int, Decimal, frozenset[str]]:
     """Return (index, top_n, margin_usage_pct, excluded_tickers) from rebalance_config.json.
 
     index is one of: SP500, NASDAQ100, DJIA.
@@ -165,20 +176,31 @@ def load_rebalance_config(_cfg: dict | None = None) -> tuple[str, int, Decimal, 
         if index not in SUPPORTED_INDEXES:
             index = _INDEX_SP500
         top_n = int(cfg.get("top_n", SP500_TOP_N))
-        margin_usage_pct = Decimal(str(cfg.get("margin_usage_pct", "0.5"))).max(Decimal("0")).min(Decimal("1"))
+        raw_margin_usage_pct = cfg.get("margin_usage_pct", "0.5")
+        try:
+            margin_usage_pct = (
+                Decimal(str(raw_margin_usage_pct)).max(Decimal("0")).min(Decimal("1"))
+            )
+        except (InvalidOperation, ValueError, TypeError):
+            log.warning(
+                "Invalid margin_usage_pct=%r in rebalance config — using default 0.5.",
+                raw_margin_usage_pct,
+            )
+            margin_usage_pct = Decimal("0.5")
         excluded_tickers = frozenset(
             str(t).upper().strip()
             for t in cfg.get("excluded_tickers", [])
             if str(t).strip()
         )
         return index, max(1, top_n), margin_usage_pct, excluded_tickers
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, TypeError):
         return _INDEX_SP500, SP500_TOP_N, Decimal("0.5"), frozenset()
 
 
 # ---------------------------------------------------------------------------
 # Allocation config
 # ---------------------------------------------------------------------------
+
 
 def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
     """Return allocation fractions from rebalance_config.json.
@@ -193,7 +215,14 @@ def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
         raw = cfg.get("allocations", {})
         if not raw:
             return _DEFAULT_ALLOCS.copy()
-        allocs = {k: Decimal(str(raw.get(k, _DEFAULT_ALLOCS[k]))) for k in _DEFAULT_ALLOCS}
+        allocs = {
+            k: Decimal(str(raw.get(k, _DEFAULT_ALLOCS[k]))) for k in _DEFAULT_ALLOCS
+        }
+        if any(v < Decimal("0") or v > Decimal("1") for v in allocs.values()):
+            log.warning(
+                "One or more allocations are out of range (0..1) — using defaults."
+            )
+            return _DEFAULT_ALLOCS.copy()
         total = sum(allocs.values())
         if abs(total - Decimal("1.00")) > Decimal("0.005"):
             log.warning("Allocations sum to %.4f (not 1.0) — using defaults.", total)
@@ -206,6 +235,7 @@ def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
 # ---------------------------------------------------------------------------
 # Daily buy ledger  (day-trade prevention)
 # ---------------------------------------------------------------------------
+
 
 def load_today_buys() -> frozenset[str]:
     """
@@ -227,11 +257,17 @@ def record_today_buys(symbols: set[str]) -> None:
         return
     existing = set(load_today_buys())
     existing.update(symbols)
-    TODAY_BUYS_FILE.write_text(json.dumps({
-        "date": date.today().isoformat(),
-        "symbols": sorted(existing),
-    }))
-    log.info("Day-trade ledger updated: %d symbol(s) bought today total.", len(existing))
+    TODAY_BUYS_FILE.write_text(
+        json.dumps(
+            {
+                "date": date.today().isoformat(),
+                "symbols": sorted(existing),
+            }
+        )
+    )
+    log.info(
+        "Day-trade ledger updated: %d symbol(s) bought today total.", len(existing)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +287,33 @@ def _fetch_bytes(url: str, extra_headers: dict | None = None) -> bytes:
 
 def _clean_tickers(raw: list) -> list[str]:
     """Strip whitespace and drop empty / placeholder values from a ticker list."""
-    return [str(t).strip() for t in raw if isinstance(t, str) and str(t).strip() not in ("", "-", "N/A")]
+    return [
+        str(t).strip()
+        for t in raw
+        if isinstance(t, str) and str(t).strip() not in ("", "-", "N/A")
+    ]
+
+
+def _first_table_column(
+    tables: list[pd.DataFrame],
+    candidate_columns: tuple[str, ...],
+    label: str,
+) -> tuple[pd.DataFrame, str]:
+    """Return the first Wikipedia table containing one of the expected ticker columns."""
+    if not tables:
+        raise RuntimeError(f"Could not find {label} constituent table on Wikipedia")
+    for df in tables:
+        for col in candidate_columns:
+            if col in df.columns:
+                return df, col
+    expected = ", ".join(candidate_columns)
+    raise RuntimeError(
+        f"Could not find {label} constituent table with expected column(s): {expected}"
+    )
 
 
 # --- official sources ---
+
 
 def _fetch_sp500_tickers_official() -> list[str]:
     """Fetch S&P 500 constituents from iShares IVV daily holdings CSV.
@@ -283,9 +342,14 @@ def _fetch_nasdaq100_tickers_official() -> list[str]:
         "https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses"
         "/QQQ/holdings/fund?idType=ticker&productType=ETF"
     )
-    data = json.loads(_fetch_bytes(url, {"Referer": "https://www.invesco.com/qqq-etf/en/about.html"}).decode("utf-8"))
+    data = json.loads(
+        _fetch_bytes(
+            url, {"Referer": "https://www.invesco.com/qqq-etf/en/about.html"}
+        ).decode("utf-8")
+    )
     tickers = [
-        h["ticker"] for h in data["holdings"]
+        h["ticker"]
+        for h in data["holdings"]
         if h.get("ticker")
         and h.get("securityTypeCode") not in ("IFUT", "CASH", "FXFWD")
         and str(h["ticker"]).replace(".", "").isalpha()
@@ -303,40 +367,73 @@ def _fetch_djia_tickers_official() -> list[str]:
         "https://www.ssga.com/us/en/intermediary/etfs/library-content/products"
         "/fund-data/etfs/us/holdings-daily-us-en-dia.xlsx"
     )
-    df = pd.read_excel(io.BytesIO(_fetch_bytes(url, {"Referer": "https://www.ssga.com/"})), skiprows=4, engine="openpyxl")
+    df = pd.read_excel(
+        io.BytesIO(_fetch_bytes(url, {"Referer": "https://www.ssga.com/"})),
+        skiprows=4,
+        engine="openpyxl",
+    )
     return _clean_tickers(df["Ticker"].tolist())
 
 
 # --- Wikipedia fallbacks ---
 
+
 def _fetch_sp500_tickers_wikipedia() -> list[str]:
     """Scrape the S&P 500 constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for S&P 500 constituents…")
-    html = _fetch_bytes("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies").decode("utf-8")
-    tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
-    return _clean_tickers(tables[0]["Symbol"].tolist())
+    html = _fetch_bytes(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    ).decode("utf-8")
+    try:
+        tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
+    except ValueError as exc:
+        raise RuntimeError(
+            "Could not parse S&P 500 constituent table from Wikipedia"
+        ) from exc
+    df, col = _first_table_column(tables, ("Symbol",), "S&P 500")
+    tickers = _clean_tickers(df[col].tolist())
+    if not tickers:
+        raise RuntimeError(
+            "S&P 500 Wikipedia constituent table contained no usable tickers"
+        )
+    return tickers
 
 
 def _fetch_nasdaq100_tickers_wikipedia() -> list[str]:
     """Scrape the NASDAQ-100 constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for NASDAQ-100 constituents…")
     html = _fetch_bytes("https://en.wikipedia.org/wiki/Nasdaq-100").decode("utf-8")
-    tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
-    df = tables[0]
-    col = "Ticker" if "Ticker" in df.columns else "Symbol"
-    return _clean_tickers(df[col].tolist())
+    try:
+        tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
+    except ValueError as exc:
+        raise RuntimeError(
+            "Could not parse NASDAQ-100 constituent table from Wikipedia"
+        ) from exc
+    df, col = _first_table_column(tables, ("Ticker", "Symbol"), "NASDAQ-100")
+    tickers = _clean_tickers(df[col].tolist())
+    if not tickers:
+        raise RuntimeError(
+            "NASDAQ-100 Wikipedia constituent table contained no usable tickers"
+        )
+    return tickers
 
 
 def _fetch_djia_tickers_wikipedia() -> list[str]:
     """Scrape the DJIA constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for DJIA constituents…")
-    html = _fetch_bytes("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average").decode("utf-8")
+    html = _fetch_bytes(
+        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
+    ).decode("utf-8")
     tables = pd.read_html(io.StringIO(html))
     for df in tables:
         for col in ("Symbol", "Ticker"):
             if col in df.columns:
                 tickers = _clean_tickers(
-                    [t for t in df[col].tolist() if isinstance(t, str) and t.replace(".", "").isalpha()]
+                    [
+                        t
+                        for t in df[col].tolist()
+                        if isinstance(t, str) and t.replace(".", "").isalpha()
+                    ]
                 )
                 if len(tickers) >= 20:
                     return tickers
@@ -344,6 +441,7 @@ def _fetch_djia_tickers_wikipedia() -> list[str]:
 
 
 # --- public fetch functions ---
+
 
 def _fetch_sp500_tickers() -> list[str]:
     log.info("Fetching S&P 500 constituents (iShares IVV)…")
@@ -401,35 +499,76 @@ def fetch_constituents(index: str) -> list[str]:
 # Market caps (daily cache, parallel fetch)
 # ---------------------------------------------------------------------------
 
+
 def _load_market_cap_cache(index: str) -> dict[str, float] | None:
-    if not MARKET_CAP_CACHE_FILE.exists():
-        return None
     try:
         data = json.loads(MARKET_CAP_CACHE_FILE.read_text())
+        raw_caps = data.get("caps")
+        if not isinstance(raw_caps, dict):
+            log.warning("Market cap cache has invalid caps payload — discarding.")
+            return None
+        if not raw_caps:
+            log.info("Market cap cache is empty — discarding.")
+            return None
+        source_ticker_count = data.get("source_ticker_count")
+        if not isinstance(source_ticker_count, int) or source_ticker_count < 1:
+            log.info("Market cap cache missing coverage metadata — discarding.")
+            return None
+        min_required = max(1, source_ticker_count // 2)
+        if len(raw_caps) < min_required:
+            log.info(
+                "Market cap cache coverage too low (%d/%d, threshold: %d) — discarding.",
+                len(raw_caps),
+                source_ticker_count,
+                min_required,
+            )
+            return None
         # Support both new "index" key and legacy "etf_ticker" key in cache
-        cached_raw = data.get("index") or _ETF_TO_INDEX.get(data.get("etf_ticker", ""), _INDEX_SP500)
+        cached_raw = data.get("index") or _ETF_TO_INDEX.get(
+            data.get("etf_ticker", ""), _INDEX_SP500
+        )
         if cached_raw != index:
-            log.info("Index changed (%s → %s) — discarding market cap cache.", cached_raw, index)
+            log.info(
+                "Index changed (%s → %s) — discarding market cap cache.",
+                cached_raw,
+                index,
+            )
             return None
         age = datetime.now() - datetime.fromisoformat(data["updated_at"])
         if age > timedelta(hours=MARKET_CAP_CACHE_MAX_AGE_HOURS):
-            log.info("Market cap cache is %.1f hours old — will refresh.", age.total_seconds() / 3600)
+            log.info(
+                "Market cap cache is %.1f hours old — will refresh.",
+                age.total_seconds() / 3600,
+            )
             return None
-        log.info("Using cached market caps (%d entries, %.0f min old).",
-                 len(data["caps"]), age.total_seconds() / 60)
+        log.info(
+            "Using cached market caps (%d entries, %.0f min old).",
+            len(raw_caps),
+            age.total_seconds() / 60,
+        )
         # Older caches stored yfinance-style share-class tickers (e.g. BRK-B).
         return {
             YF_TO_BROKER_SYMBOLS.get(symbol, symbol): cap
-            for symbol, cap in data["caps"].items()
+            for symbol, cap in raw_caps.items()
         }
     except Exception as exc:
         log.warning("Could not read market cap cache: %s", exc)
         return None
 
 
-def _save_market_cap_cache(caps: dict[str, float], index: str) -> None:
+def _save_market_cap_cache(
+    caps: dict[str, float], index: str, source_ticker_count: int
+) -> None:
     MARKET_CAP_CACHE_FILE.write_text(
-        json.dumps({"updated_at": datetime.now().isoformat(), "index": index, "caps": caps}, indent=2)
+        json.dumps(
+            {
+                "updated_at": datetime.now().isoformat(),
+                "index": index,
+                "source_ticker_count": source_ticker_count,
+                "caps": caps,
+            },
+            indent=2,
+        )
     )
     log.info("Market cap cache saved (%d entries).", len(caps))
 
@@ -458,22 +597,52 @@ def fetch_market_caps(tickers: list[str], index: str) -> dict[str, float]:
     if cached is not None:
         return cached
 
-    log.info("Fetching market caps for %d tickers (%d workers)…",
-             len(tickers), MARKET_CAP_FETCH_WORKERS)
+    log.info(
+        "Fetching market caps for %d tickers (%d workers)…",
+        len(tickers),
+        MARKET_CAP_FETCH_WORKERS,
+    )
     caps: dict[str, float] = {}
     done = 0
-    with ThreadPoolExecutor(max_workers=MARKET_CAP_FETCH_WORKERS) as pool:
+    pool = ThreadPoolExecutor(max_workers=MARKET_CAP_FETCH_WORKERS)
+    timed_out = False
+    try:
         futures = {pool.submit(_fetch_one_market_cap, t): t for t in tickers}
-        for future in as_completed(futures):
-            ticker, mc = future.result()
-            if mc:
-                caps[ticker] = mc
-            done += 1
-            if done % 100 == 0:
-                log.info("  … %d / %d done", done, len(tickers))
+        try:
+            for future in as_completed(
+                futures, timeout=MARKET_CAP_FETCH_TIMEOUT_SECONDS
+            ):
+                ticker, mc = future.result()
+                if mc:
+                    caps[ticker] = mc
+                done += 1
+                if done % 100 == 0:
+                    log.info("  … %d / %d done", done, len(tickers))
+        except _FuturesTimeoutError:
+            timed_out = True
+            log.warning(
+                "Market cap fetch timed out after %ds — %d / %d tickers completed.",
+                MARKET_CAP_FETCH_TIMEOUT_SECONDS,
+                len(caps),
+                len(tickers),
+            )
+    finally:
+        if timed_out:
+            pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            pool.shutdown(wait=True)
 
     log.info("  → market caps for %d / %d tickers", len(caps), len(tickers))
-    _save_market_cap_cache(caps, index)
+    min_required = max(1, len(tickers) // 2)
+    if len(caps) >= min_required:
+        _save_market_cap_cache(caps, index, len(tickers))
+    else:
+        log.warning(
+            "Market cap fetch returned only %d / %d results (threshold: %d) — skipping cache write.",
+            len(caps),
+            len(tickers),
+            min_required,
+        )
     return caps
 
 
@@ -481,22 +650,34 @@ def fetch_market_caps(tickers: list[str], index: str) -> dict[str, float]:
 # Top-N selection and weight computation
 # ---------------------------------------------------------------------------
 
+
 def top_n_by_market_cap(
     tickers: list[str],
     market_caps: dict[str, float],
     n: int,
 ) -> list[str]:
-    """Return the top-N S&P 500 tickers ranked by market cap."""
+    """Return the top-N index tickers ranked by market cap."""
     ranked = sorted(
         [t for t in tickers if t in market_caps],
         key=lambda t: market_caps[t],
         reverse=True,
     )
     top = ranked[:n]
-    log.info("Top %d stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
-             n,
-             top[0], market_caps[top[0]] / 1e12,
-             top[-1], market_caps[top[-1]] / 1e9)
+    if not top:
+        log.error(
+            "No usable market caps found for %d constituent(s); cannot select top %d.",
+            len(tickers),
+            n,
+        )
+        return []
+    log.info(
+        "Top %d stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
+        len(top),
+        top[0],
+        market_caps[top[0]] / 1e12,
+        top[-1],
+        market_caps[top[-1]] / 1e9,
+    )
     return top
 
 
@@ -521,52 +702,88 @@ def compute_stock_weights(
 # Broker error classification
 # ---------------------------------------------------------------------------
 
+
 class PatternDayTradingError(RuntimeError):
     """Raised when the broker rejects an order due to PDT restrictions."""
 
 
 def _is_pdt_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(kw in msg for kw in (
-        "pattern day trad", "pdt", "day trade limit", "day trading restriction",
-        "flagged as a pattern day trader",
-    ))
+    return any(
+        kw in msg
+        for kw in (
+            "pattern day trad",
+            "pdt",
+            "day trade limit",
+            "day trading restriction",
+            "flagged as a pattern day trader",
+        )
+    )
 
 
 def _is_intraday_margin_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(kw in msg for kw in (
-        "intraday margin", "intraday buying power", "margin call",
-        "margin maintenance", "day trading margin", "margin deficiency",
-    ))
+    return any(
+        kw in msg
+        for kw in (
+            "intraday margin",
+            "intraday buying power",
+            "margin call",
+            "margin maintenance",
+            "day trading margin",
+            "margin deficiency",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
 # Portfolio snapshot
 # ---------------------------------------------------------------------------
 
+
 def get_portfolio_snapshot(
     client,
-) -> tuple[Decimal, Decimal, Decimal, dict[str, Decimal], dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[
+    Decimal,
+    Decimal,
+    Decimal,
+    dict[str, Decimal],
+    dict[str, Decimal],
+    dict[str, Decimal],
+    dict[str, Decimal],
+]:
     """
     Fetch current portfolio from Public.com.
 
     Returns:
-        total_equity          — sum of all asset values (cash + investments)
-        buying_power          — total available buying power (cash + margin if enabled)
+        total_equity           — sum of all asset values (cash + investments)
+        buying_power           — total available buying power (cash + margin if enabled)
         cash_only_buying_power — buying power from settled cash only (no margin)
-        equity_pos            — {symbol: current_value} for EQUITY positions
-        crypto_pos            — {symbol: current_value} for CRYPTO positions
-        equity_qty            — {symbol: share_quantity} for EQUITY positions
+        equity_pos             — {symbol: current_value} for EQUITY positions
+        crypto_pos             — {symbol: current_value} for CRYPTO positions
+        equity_qty             — {symbol: share_quantity} for EQUITY positions
+        crypto_qty             — {symbol: coin_quantity} for CRYPTO positions
     """
     portfolio = client.get_portfolio()
     total_equity = sum(e.value for e in portfolio.equity)
-    buying_power = getattr(portfolio.buying_power, "buying_power", Decimal("0"))
-    cash_only_buying_power = getattr(portfolio.buying_power, "cash_only_buying_power", buying_power)
+    buying_power_obj = getattr(portfolio, "buying_power", None)
+    raw_buying_power = getattr(buying_power_obj, "buying_power", None)
+    raw_cash_only_buying_power = getattr(
+        buying_power_obj, "cash_only_buying_power", None
+    )
+    buying_power = (
+        Decimal(str(raw_buying_power)) if raw_buying_power is not None else Decimal("0")
+    )
+    cash_only_buying_power = (
+        Decimal(str(raw_cash_only_buying_power))
+        if raw_cash_only_buying_power is not None
+        else buying_power
+    )
 
     equity_pos: dict[str, Decimal] = {}
     equity_qty: dict[str, Decimal] = {}
     crypto_pos: dict[str, Decimal] = {}
+    crypto_qty: dict[str, Decimal] = {}
     for pos in portfolio.positions:
         if pos.instrument.type == InstrumentType.EQUITY:
             if pos.current_value is not None:
@@ -576,13 +793,24 @@ def get_portfolio_snapshot(
         elif pos.instrument.type == InstrumentType.CRYPTO:
             if pos.current_value is not None:
                 crypto_pos[pos.instrument.symbol] = pos.current_value
+            if pos.quantity is not None:
+                crypto_qty[pos.instrument.symbol] = Decimal(str(pos.quantity))
 
-    return total_equity, buying_power, cash_only_buying_power, equity_pos, crypto_pos, equity_qty
+    return (
+        total_equity,
+        buying_power,
+        cash_only_buying_power,
+        equity_pos,
+        crypto_pos,
+        equity_qty,
+        crypto_qty,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Order helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_order(
     symbol: str,
@@ -591,6 +819,7 @@ def _make_order(
     dollar_amount: Decimal,
     crypto_price: Decimal | None = None,
     equity_quantity: Decimal | None = None,
+    crypto_held_quantity: Decimal | None = None,
 ) -> OrderRequest:
     """
     Build a market order request.
@@ -601,6 +830,8 @@ def _make_order(
     position value.
     CRYPTO orders require `quantity` (coin units) — the API does not support
     dollar-notional amounts for crypto. `crypto_price` must be provided for CRYPTO.
+    For CRYPTO SELL orders, `crypto_held_quantity` caps the submitted quantity to
+    the actual held balance, preventing broker rejection from rounding overages.
     """
     base = dict(
         order_id=str(uuid.uuid4()),
@@ -621,15 +852,25 @@ def _make_order(
             raise ValueError(
                 f"CRYPTO order quantity rounds to zero ({symbol}: ${dollar_amount} at ${crypto_price}/coin)"
             )
+        if side == OrderSide.SELL and crypto_held_quantity is not None:
+            quantity = min(quantity, crypto_held_quantity).quantize(Decimal("0.00001"))
+            if quantity <= 0:
+                raise ValueError(
+                    f"CRYPTO SELL quantity rounds to zero after capping to held balance ({symbol})"
+                )
         return OrderRequest(**base, quantity=quantity)
     # Equity — prefer quantity ordering for full liquidations
     if equity_quantity is not None:
         if equity_quantity <= 0:
-            raise ValueError(f"Equity quantity is zero for full-liquidation sell ({symbol})")
+            raise ValueError(
+                f"Equity quantity is zero for full-liquidation sell ({symbol})"
+            )
         return OrderRequest(**base, quantity=equity_quantity)
     amount = dollar_amount.quantize(Decimal("0.01"))
     if amount <= 0:
-        raise ValueError(f"Equity order amount rounds to zero ({symbol}: ${dollar_amount})")
+        raise ValueError(
+            f"Equity order amount rounds to zero ({symbol}: ${dollar_amount})"
+        )
     return OrderRequest(**base, amount=amount)
 
 
@@ -647,21 +888,24 @@ def fetch_crypto_price(client, symbol: str, yf_ticker: str) -> Decimal:
         if quotes and quotes[0].bid and quotes[0].ask:
             return (Decimal(str(quotes[0].bid)) + Decimal(str(quotes[0].ask))) / 2
     except Exception as exc:
-        log.warning("Could not fetch %s price from Public API: %s — falling back to yfinance", symbol, exc)
+        log.warning(
+            "Could not fetch %s price from Public API: %s — falling back to yfinance",
+            symbol,
+            exc,
+        )
 
-    data = yf.download(yf_ticker, period="1d", auto_adjust=True, progress=False)
+    data = yf.download(
+        yf_ticker,
+        period="1d",
+        auto_adjust=True,
+        progress=False,
+        timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
+        multi_level_index=False,
+    )
     if not data.empty:
         return Decimal(str(float(data["Close"].iloc[-1])))
 
     raise RuntimeError(f"Unable to fetch {symbol} price from any source")
-
-
-_ACTIVE_ORDER_STATUSES = {
-    OrderStatus.NEW,
-    OrderStatus.PARTIALLY_FILLED,
-    OrderStatus.PENDING_REPLACE,
-    OrderStatus.PENDING_CANCEL,
-}
 
 
 def cancel_open_orders(client, orders: list) -> None:
@@ -674,9 +918,19 @@ def cancel_open_orders(client, orders: list) -> None:
     for order in open_orders:
         try:
             client.cancel_order(order.order_id)
-            log.info("  ✓ Cancelled %s %s (ID: %s)", order.side.value, order.instrument.symbol, order.order_id[:8])
+            log.info(
+                "  ✓ Cancelled %s %s (ID: %s)",
+                order.side.value,
+                order.instrument.symbol,
+                order.order_id[:8],
+            )
         except Exception as exc:
-            log.warning("  ✗ Could not cancel %s (ID: %s): %s", order.instrument.symbol, order.order_id[:8], exc)
+            log.warning(
+                "  ✗ Could not cancel %s (ID: %s): %s",
+                order.instrument.symbol,
+                order.order_id[:8],
+                exc,
+            )
         time.sleep(0.05)
 
 
@@ -685,13 +939,20 @@ def place_orders(
     orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
     crypto_prices: dict[str, Decimal] | None = None,
     liquidation_quantities: dict[str, Decimal] | None = None,
-) -> list[str]:
+    crypto_quantities: dict[str, Decimal] | None = None,
+) -> tuple[list[str], list[tuple[str, InstrumentType, OrderSide, Decimal]]]:
     """
     Place a list of (symbol, instrument_type, side, dollar_amount) market orders.
 
     liquidation_quantities: {symbol: share_count} for equity SELL orders that
         must use share-quantity ordering (full-position liquidations where the
         broker rejects notional orders whose value ≈ full position value).
+    crypto_quantities: {symbol: coin_count} held balances used to cap SELL
+        quantities and prevent broker rejection from rounding overages.
+
+    Returns (submitted_order_ids, submitted_orders) — only orders that were
+    accepted by the broker appear in these lists, so callers can record only
+    what actually went through (e.g. PDT ledger should only log real buys).
 
     Raises PatternDayTradingError immediately if the broker signals a PDT
     restriction, so the caller can abort the entire rebalance cleanly.
@@ -699,6 +960,7 @@ def place_orders(
     """
     success = fail = 0
     submitted_order_ids: list[str] = []
+    submitted_orders: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
     for symbol, inst_type, side, dollar_amount in orders:
         try:
             price = (crypto_prices or {}).get(symbol)
@@ -707,35 +969,78 @@ def place_orders(
                 if inst_type == InstrumentType.EQUITY and side == OrderSide.SELL
                 else None
             )
-            req = _make_order(symbol, inst_type, side, dollar_amount, price, eq_qty)
+            crypto_held = (
+                (crypto_quantities or {}).get(symbol)
+                if inst_type == InstrumentType.CRYPTO and side == OrderSide.SELL
+                else None
+            )
+            req = _make_order(
+                symbol, inst_type, side, dollar_amount, price, eq_qty, crypto_held
+            )
             new_order = client.place_order(req)
             if inst_type == InstrumentType.CRYPTO:
-                log.info("  ✓ %-6s %-6s $%9.2f  (%s coins @ $%.2f)  order id: %s",
-                         side.value, symbol, dollar_amount, req.quantity, price, new_order.order_id[:8])
+                log.info(
+                    "  ✓ %-6s %-6s $%9.2f  (%s coins @ $%.2f)  order id: %s",
+                    side.value,
+                    symbol,
+                    dollar_amount,
+                    req.quantity,
+                    price,
+                    new_order.order_id[:8],
+                )
             elif eq_qty is not None:
-                log.info("  ✓ %-6s %-6s %s shares (liquidation)  order id: %s",
-                         side.value, symbol, eq_qty, new_order.order_id[:8])
+                log.info(
+                    "  ✓ %-6s %-6s %s shares (liquidation)  order id: %s",
+                    side.value,
+                    symbol,
+                    eq_qty,
+                    new_order.order_id[:8],
+                )
             else:
-                log.info("  ✓ %-6s %-6s $%9.2f  order id: %s",
-                         side.value, symbol, dollar_amount, new_order.order_id[:8])
+                log.info(
+                    "  ✓ %-6s %-6s $%9.2f  order id: %s",
+                    side.value,
+                    symbol,
+                    dollar_amount,
+                    new_order.order_id[:8],
+                )
             submitted_order_ids.append(new_order.order_id)
+            submitted_orders.append((symbol, inst_type, side, dollar_amount))
             success += 1
         except Exception as exc:
             if _is_pdt_error(exc):
-                log.error("  ✗ %-6s %-6s — PATTERN DAY TRADING restriction: %s", side.value, symbol, exc)
-                log.error("PDT restriction detected — aborting remaining orders (%d placed so far).", success)
+                log.error(
+                    "  ✗ %-6s %-6s — PATTERN DAY TRADING restriction: %s",
+                    side.value,
+                    symbol,
+                    exc,
+                )
+                log.error(
+                    "PDT restriction detected — aborting remaining orders (%d placed so far).",
+                    success,
+                )
                 fail += 1
                 raise PatternDayTradingError(str(exc)) from exc
             if _is_intraday_margin_error(exc):
-                log.warning("  ✗ %-6s %-6s — intraday margin limit reached: %s", side.value, symbol, exc)
-                log.warning("Stopping further orders to avoid margin breach (%d placed so far).", success)
+                log.warning(
+                    "  ✗ %-6s %-6s — intraday margin limit reached: %s",
+                    side.value,
+                    symbol,
+                    exc,
+                )
+                log.warning(
+                    "Stopping further orders to avoid margin breach (%d placed so far).",
+                    success,
+                )
                 fail += 1
                 break
-            log.error("  ✗ %-6s %-6s $%9.2f  → %s", side.value, symbol, dollar_amount, exc)
+            log.error(
+                "  ✗ %-6s %-6s $%9.2f  → %s", side.value, symbol, dollar_amount, exc
+            )
             fail += 1
         time.sleep(0.1)
     log.info("Orders placed: %d  |  failed: %d", success, fail)
-    return submitted_order_ids
+    return submitted_order_ids, submitted_orders
 
 
 def wait_for_orders_to_clear(
@@ -764,11 +1069,17 @@ def wait_for_orders_to_clear(
         if not pending:
             log.info("All %s orders are no longer active.", label)
             return True
-        log.info("Waiting for %d %s order(s) to clear before continuing…", len(pending), label)
+        log.info(
+            "Waiting for %d %s order(s) to clear before continuing…",
+            len(pending),
+            label,
+        )
         time.sleep(ORDER_STATUS_POLL_SECONDS)
 
     if pending:
-        log.warning("Timed out waiting for %d %s order(s) to clear.", len(pending), label)
+        log.warning(
+            "Timed out waiting for %d %s order(s) to clear.", len(pending), label
+        )
         return False
     return True
 
@@ -782,7 +1093,9 @@ def cap_buy_orders_to_buying_power(
     """
     available_budget = max(Decimal("0"), buying_power - BUYING_POWER_BUFFER)
     if available_budget <= 0:
-        log.warning("No buy orders will be placed: buying power is only $%.2f.", buying_power)
+        log.warning(
+            "No buy orders will be placed: buying power is only $%.2f.", buying_power
+        )
         return []
 
     selected: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
@@ -798,19 +1111,28 @@ def cap_buy_orders_to_buying_power(
 
     total_selected = sum(order[3] for order in selected)
     total_skipped = sum(order[3] for order in skipped)
-    log.info("Buy budget: $%.2f available after buffer, $%.2f selected, $%.2f skipped.",
-             available_budget, total_selected, total_skipped)
+    log.info(
+        "Buy budget: $%.2f available after buffer, $%.2f selected, $%.2f skipped.",
+        available_budget,
+        total_selected,
+        total_skipped,
+    )
     if skipped:
         skipped_symbols = ", ".join(symbol for symbol, *_ in skipped[:10])
         suffix = "…" if len(skipped) > 10 else ""
-        log.warning("Skipped %d buy order(s) that exceed buying power: %s%s",
-                    len(skipped), skipped_symbols, suffix)
+        log.warning(
+            "Skipped %d buy order(s) that exceed buying power: %s%s",
+            len(skipped),
+            skipped_symbols,
+            suffix,
+        )
     return selected
 
 
 # ---------------------------------------------------------------------------
 # Delta computation helpers
 # ---------------------------------------------------------------------------
+
 
 def compute_delta(
     symbol: str,
@@ -832,7 +1154,12 @@ def compute_delta(
     if delta > drift_threshold:
         return (symbol, instrument_type, OrderSide.BUY, delta.quantize(Decimal("0.01")))
     if delta < -drift_threshold and abs(delta) >= MIN_ORDER_DOLLARS:
-        return (symbol, instrument_type, OrderSide.SELL, abs(delta).quantize(Decimal("0.01")))
+        return (
+            symbol,
+            instrument_type,
+            OrderSide.SELL,
+            abs(delta).quantize(Decimal("0.01")),
+        )
     return None
 
 
@@ -859,6 +1186,7 @@ def compute_unallocated_buy_delta(
 # Main rebalancing logic
 # ---------------------------------------------------------------------------
 
+
 def rebalance() -> None:
     log.info("=" * 64)
     log.info("PORTFOLIO REBALANCE  —  %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -866,31 +1194,61 @@ def rebalance() -> None:
     index, top_n, margin_usage_pct, excluded_tickers = load_rebalance_config(_cfg)
     alloc = load_allocation_config(_cfg)
     alloc_stocks = alloc["stocks"]
-    alloc_btc    = alloc["btc"]
-    alloc_eth    = alloc["eth"]
-    alloc_gold   = alloc["gold"]
-    alloc_cash   = alloc["cash"]
-    log.info("  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% gold  |  %.0f%% cash",
-             alloc_stocks * 100, alloc_btc * 100, alloc_eth * 100, alloc_gold * 100, alloc_cash * 100)
-    log.info("  Index: %s (%s) — top %d by market cap", index, SUPPORTED_INDEXES.get(index, index), top_n)
+    alloc_btc = alloc["btc"]
+    alloc_eth = alloc["eth"]
+    alloc_gold = alloc["gold"]
+    alloc_cash = alloc["cash"]
+    log.info(
+        "  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% gold  |  %.0f%% cash",
+        alloc_stocks * 100,
+        alloc_btc * 100,
+        alloc_eth * 100,
+        alloc_gold * 100,
+        alloc_cash * 100,
+    )
+    log.info(
+        "  Index: %s (%s) — top %d by market cap",
+        index,
+        SUPPORTED_INDEXES.get(index, index),
+        top_n,
+    )
     log.info("  Margin usage: %.0f%% of margin capacity", margin_usage_pct * 100)
     if excluded_tickers:
-        log.info("  Excluded tickers (%d): %s", len(excluded_tickers), ", ".join(sorted(excluded_tickers)))
+        log.info(
+            "  Excluded tickers (%d): %s",
+            len(excluded_tickers),
+            ", ".join(sorted(excluded_tickers)),
+        )
     log.info("=" * 64)
 
     if SKIP_FILE.exists():
         SKIP_FILE.unlink()
-        log.info("SKIPPED — skip sentinel was set. Removed sentinel; next run will proceed normally.")
+        log.info(
+            "SKIPPED — skip sentinel was set. Removed sentinel; next run will proceed normally."
+        )
         return
 
     constituents = fetch_constituents(index)
     market_caps = fetch_market_caps(constituents, index)
     _top_stocks_raw = top_n_by_market_cap(constituents, market_caps, top_n)
+    if not _top_stocks_raw:
+        log.error(
+            "REBALANCE ABORTED — no top stocks could be selected from market-cap data."
+        )
+        return
     top_stocks = [t for t in _top_stocks_raw if t not in excluded_tickers]
     if excluded_tickers:
         filtered_out = excluded_tickers & set(_top_stocks_raw)
         if filtered_out:
-            log.info("  Excluded from top-%d: %s", top_n, ", ".join(sorted(filtered_out)))
+            log.info(
+                "  Excluded from top-%d: %s", top_n, ", ".join(sorted(filtered_out))
+            )
+    if not top_stocks:
+        log.error(
+            "REBALANCE ABORTED — all selected top-%d stocks are excluded by config.",
+            top_n,
+        )
+        return
     stock_weights = compute_stock_weights(top_stocks, market_caps)
 
     log.info("Fetching portfolio from Public.com…")
@@ -900,30 +1258,54 @@ def rebalance() -> None:
         cancel_open_orders(client, initial_portfolio.orders or [])
 
         # Re-fetch after cancellations so snapshot reflects the clean state
-        total_equity, buying_power, cash_only_bp, equity_pos, crypto_pos, equity_qty = get_portfolio_snapshot(client)
+        (
+            total_equity,
+            buying_power,
+            cash_only_bp,
+            equity_pos,
+            crypto_pos,
+            equity_qty,
+            crypto_qty,
+        ) = get_portfolio_snapshot(client)
         margin_capacity = buying_power - cash_only_bp
         margin_to_deploy = margin_usage_pct * margin_capacity
         investment_base = total_equity + margin_to_deploy
         effective_buying_power = cash_only_bp + margin_to_deploy
         log.info(
             "  Total equity: $%.2f  |  margin to deploy: $%.2f  |  investment base: $%.2f  |  effective BP: $%.2f  |  equity positions: %d",
-            total_equity, margin_to_deploy, investment_base, effective_buying_power, len(equity_pos),
+            total_equity,
+            margin_to_deploy,
+            investment_base,
+            effective_buying_power,
+            len(equity_pos),
         )
 
         sells: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
-        buys:  list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+        buys: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
 
         today_buys = load_today_buys()
         if today_buys:
-            log.info("Day-trade prevention: %d symbol(s) bought earlier today are protected from same-day sells.",
-                     len(today_buys))
+            log.info(
+                "Day-trade prevention: %d symbol(s) bought earlier today are protected from same-day sells.",
+                len(today_buys),
+            )
 
         def queue(order):
             if order is None:
                 return
             symbol, inst_type, side, amount = order
-            if side == OrderSide.SELL and inst_type == InstrumentType.EQUITY and symbol in today_buys:
-                log.warning("Day-trade prevention: skipping SELL %s — position was opened earlier today.", symbol)
+            if symbol in excluded_tickers:
+                log.info("  Skipping %s %s — excluded by config.", side.value, symbol)
+                return
+            if (
+                side == OrderSide.SELL
+                and inst_type == InstrumentType.EQUITY
+                and symbol in today_buys
+            ):
+                log.warning(
+                    "Day-trade prevention: skipping SELL %s — position was opened earlier today.",
+                    symbol,
+                )
                 return
             if side == OrderSide.SELL:
                 sells.append(order)
@@ -943,39 +1325,121 @@ def rebalance() -> None:
             weight = stock_weights.get(symbol, Decimal("0"))
             target = (weight * alloc_stocks * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
-            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")))
+            queue(
+                compute_delta(
+                    symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")
+                )
+            )
 
         def queue_etf_delta(symbol: str, alloc_pct: Decimal) -> None:
-            target  = (alloc_pct * investment_base).quantize(Decimal("0.01"))
+            target = (alloc_pct * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
-            log.info("  %s  target=$%.2f  current=$%.2f  delta=$%.2f",
-                     symbol, target, current, target - current)
-            queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")))
+            log.info(
+                "  %s  target=$%.2f  current=$%.2f  delta=$%.2f",
+                symbol,
+                target,
+                current,
+                target - current,
+            )
+            queue(
+                compute_delta(
+                    symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")
+                )
+            )
 
-        # Fetch BTC and ETH prices in parallel
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            btc_future = pool.submit(fetch_crypto_price, client, BTC_SYMBOL, "BTC-USD")
-            eth_future = pool.submit(fetch_crypto_price, client, ETH_SYMBOL, "ETH-USD")
-            btc_price = btc_future.result()
-            eth_price = eth_future.result()
+        crypto_prices: dict[str, Decimal] = {}
+        crypto_to_fetch = {
+            symbol: BROKER_TO_YF_SYMBOLS.get(symbol, f"{symbol}-USD")
+            for symbol in (BTC_SYMBOL, ETH_SYMBOL)
+            if symbol not in excluded_tickers
+        }
+        if crypto_to_fetch:
+            pool = ThreadPoolExecutor(max_workers=len(crypto_to_fetch))
+            futures = {
+                pool.submit(fetch_crypto_price, client, symbol, yf_ticker): symbol
+                for symbol, yf_ticker in crypto_to_fetch.items()
+            }
+            try:
+                for future in as_completed(
+                    futures, timeout=CRYPTO_PRICE_FETCH_TIMEOUT_SECONDS
+                ):
+                    symbol = futures[future]
+                    try:
+                        crypto_prices[symbol] = future.result()
+                    except Exception as exc:
+                        log.error(
+                            "Could not fetch %s price — aborting rebalance: %s",
+                            symbol,
+                            exc,
+                        )
+                        raise RuntimeError(f"Could not fetch {symbol} price") from exc
+            except _FuturesTimeoutError as exc:
+                pending = [
+                    symbol for future, symbol in futures.items() if not future.done()
+                ]
+                log.error(
+                    "Timed out after %ds fetching crypto price(s): %s — aborting rebalance.",
+                    CRYPTO_PRICE_FETCH_TIMEOUT_SECONDS,
+                    ", ".join(sorted(pending)) or "unknown",
+                )
+                raise RuntimeError("Timed out fetching crypto prices") from exc
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
-        log.info("--- Computing BTC delta ---")
-        btc_target  = (alloc_btc * investment_base).quantize(Decimal("0.01"))
-        btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
-        log.info("  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-                 btc_price, btc_target, btc_current, btc_target - btc_current)
-        queue(compute_delta(BTC_SYMBOL, InstrumentType.CRYPTO, btc_target, btc_current, Decimal("1.00")))
+        if BTC_SYMBOL in excluded_tickers:
+            log.info("--- Skipping BTC delta — excluded by config. ---")
+        else:
+            log.info("--- Computing BTC delta ---")
+            btc_price = crypto_prices[BTC_SYMBOL]
+            btc_target = (alloc_btc * investment_base).quantize(Decimal("0.01"))
+            btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
+            log.info(
+                "  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+                btc_price,
+                btc_target,
+                btc_current,
+                btc_target - btc_current,
+            )
+            queue(
+                compute_delta(
+                    BTC_SYMBOL,
+                    InstrumentType.CRYPTO,
+                    btc_target,
+                    btc_current,
+                    Decimal("1.00"),
+                )
+            )
 
-        log.info("--- Computing ETH delta ---")
-        eth_target  = (alloc_eth * investment_base).quantize(Decimal("0.01"))
-        eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
-        log.info("  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-                 eth_price, eth_target, eth_current, eth_target - eth_current)
-        queue(compute_delta(ETH_SYMBOL, InstrumentType.CRYPTO, eth_target, eth_current, Decimal("1.00")))
+        if ETH_SYMBOL in excluded_tickers:
+            log.info("--- Skipping ETH delta — excluded by config. ---")
+        else:
+            log.info("--- Computing ETH delta ---")
+            eth_price = crypto_prices[ETH_SYMBOL]
+            eth_target = (alloc_eth * investment_base).quantize(Decimal("0.01"))
+            eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
+            log.info(
+                "  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+                eth_price,
+                eth_target,
+                eth_current,
+                eth_target - eth_current,
+            )
+            queue(
+                compute_delta(
+                    ETH_SYMBOL,
+                    InstrumentType.CRYPTO,
+                    eth_target,
+                    eth_current,
+                    Decimal("1.00"),
+                )
+            )
 
         log.info("--- Computing GLDM delta ---")
         queue_etf_delta(GOLD_SYMBOL, alloc_gold)
-        log.info("  Cash allocation (%.0f%%) stays uninvested — no order placed.", alloc_cash * 100)
+        log.info(
+            "  Cash allocation (%.0f%%) stays uninvested — no order placed.",
+            alloc_cash * 100,
+        )
 
         sells.sort(key=lambda order: (order[3], order[0]), reverse=True)
         buys.sort(key=lambda order: (order[3], order[0]), reverse=True)
@@ -985,11 +1449,12 @@ def rebalance() -> None:
             log.info("Portfolio is within threshold on all buckets — nothing to do.")
             return
 
-        crypto_prices = {BTC_SYMBOL: btc_price, ETH_SYMBOL: eth_price}
-
         # Stocks being fully liquidated (target=$0) must be sold by share quantity,
         # not by notional amount — the broker rejects notional orders when the amount
         # is nearly equal to the full position value.
+        # NON_STOCK_ETFS (e.g. GLDM) are excluded: they always have a non-zero target
+        # and are never in stock_weights, so checking stock_weights alone would
+        # incorrectly treat every GLDM partial-sell as a full liquidation.
         liquidation_quantities = {
             symbol: equity_qty[symbol]
             for symbol, inst_type, side, _ in sells
@@ -997,42 +1462,64 @@ def rebalance() -> None:
                 inst_type == InstrumentType.EQUITY
                 and side == OrderSide.SELL
                 and symbol in equity_qty
+                and symbol not in NON_STOCK_ETFS
                 and stock_weights.get(symbol, Decimal("0")) == Decimal("0")
             )
         }
         if liquidation_quantities:
-            log.info("  %d positions will be liquidated by share quantity: %s",
-                     len(liquidation_quantities),
-                     ", ".join(sorted(liquidation_quantities)[:10])
-                     + ("…" if len(liquidation_quantities) > 10 else ""))
+            log.info(
+                "  %d positions will be liquidated by share quantity: %s",
+                len(liquidation_quantities),
+                ", ".join(sorted(liquidation_quantities)[:10])
+                + ("…" if len(liquidation_quantities) > 10 else ""),
+            )
 
         try:
             if sells:
                 log.info("--- Placing SELL orders (%d) ---", len(sells))
-                sell_order_ids = place_orders(
-                    client, sells,
+                sell_order_ids, _ = place_orders(
+                    client,
+                    sells,
                     crypto_prices=crypto_prices,
                     liquidation_quantities=liquidation_quantities,
+                    crypto_quantities=crypto_qty,
                 )
-                wait_for_orders_to_clear(client, sell_order_ids, label="sell")
+                if not wait_for_orders_to_clear(client, sell_order_ids, label="sell"):
+                    log.error(
+                        "Sell orders did not clear within timeout — aborting buy phase "
+                        "to avoid over-investing against unsettled proceeds."
+                    )
+                    return
 
             if buys:
                 post_sell_effective_bp = effective_buying_power
                 try:
-                    _, post_bp, post_cash_bp, _, _, _ = get_portfolio_snapshot(client)
+                    _, post_bp, post_cash_bp, _, _, _, _ = get_portfolio_snapshot(
+                        client
+                    )
                     post_margin_cap = post_bp - post_cash_bp
-                    post_sell_effective_bp = post_cash_bp + margin_usage_pct * post_margin_cap
-                    log.info("  Post-sell BP — cash: $%.2f  margin capacity: $%.2f  effective: $%.2f",
-                             post_cash_bp, post_margin_cap, post_sell_effective_bp)
+                    post_sell_effective_bp = (
+                        post_cash_bp + margin_usage_pct * post_margin_cap
+                    )
+                    log.info(
+                        "  Post-sell BP — cash: $%.2f  margin capacity: $%.2f  effective: $%.2f",
+                        post_cash_bp,
+                        post_margin_cap,
+                        post_sell_effective_bp,
+                    )
                 except Exception as exc:
                     log.warning("Could not refresh buying power after sells: %s", exc)
                 buys = cap_buy_orders_to_buying_power(buys, post_sell_effective_bp)
             if buys:
                 log.info("--- Placing BUY orders (%d) ---", len(buys))
-                place_orders(client, buys, crypto_prices=crypto_prices)
-                # Record equity buys so subsequent same-day runs skip selling them
+                _, submitted_buys = place_orders(
+                    client, buys, crypto_prices=crypto_prices
+                )
+                # Record only confirmed equity buys so the PDT ledger reflects
+                # what actually went through, not what was merely planned.
                 bought_today = {
-                    symbol for symbol, inst_type, _, _ in buys
+                    symbol
+                    for symbol, inst_type, _, _ in submitted_buys
                     if inst_type == InstrumentType.EQUITY
                 }
                 record_today_buys(bought_today)

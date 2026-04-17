@@ -37,7 +37,6 @@ jobs:
           uv run pyinstaller \
             --onefile \
             --name public-terminal \
-            --add-data "systemd:systemd" \
             main.py
 
       - name: Package release artifact
@@ -47,8 +46,6 @@ jobs:
           cp dist/public-terminal dist/release/
           cp .env.example dist/release/
           cp rebalance_config.json dist/release/
-          mkdir -p dist/release/systemd
-          cp systemd/* dist/release/systemd/
           mkdir -p dist/release/cache
           touch dist/release/cache/.gitkeep
           tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist/release .

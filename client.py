@@ -7,7 +7,9 @@ import os
 from dotenv import load_dotenv
 from public_api_sdk import ApiKeyAuthConfig, PublicApiClient, PublicApiClientConfiguration
 
-load_dotenv()
+from config import ENV_FILE
+
+load_dotenv(ENV_FILE)
 
 
 def get_client() -> PublicApiClient:
@@ -16,8 +18,8 @@ def get_client() -> PublicApiClient:
     Both env vars are API secret keys — the SDK exchanges them for short-lived
     bearer tokens automatically via ApiKeyAuthConfig.
 
-    Optional:
-      PUBLIC_ACCOUNT_NUMBER — default account so you don't pass it every call
+    Required for this app:
+      PUBLIC_ACCOUNT_NUMBER — default account used by portfolio/order calls
     """
     access_token = os.environ.get("PUBLIC_ACCESS_TOKEN")
     api_secret_key = os.environ.get("PUBLIC_API_SECRET_KEY")
@@ -28,7 +30,10 @@ def get_client() -> PublicApiClient:
         )
 
     account_number = os.environ.get("PUBLIC_ACCOUNT_NUMBER")
-    config = PublicApiClientConfiguration(default_account_number=account_number or None)
+    if not account_number:
+        raise RuntimeError("No account number found. Set PUBLIC_ACCOUNT_NUMBER in .env")
+
+    config = PublicApiClientConfiguration(default_account_number=account_number)
 
     secret = access_token or api_secret_key
     auth = ApiKeyAuthConfig(api_secret_key=secret)

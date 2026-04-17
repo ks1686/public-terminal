@@ -2,11 +2,11 @@
 
 A btop/htop-style trading TUI for [Public.com](https://public.com), with direct index investing and automated daily portfolio rebalancing.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  PUBLIC TERMINAL                                          12:00:00  04-16-26 │
 │  Total $17,055  BP $1.51  Options BP $0.00  Crypto BP $0.00                 │
-│  REBALANCER ● ACTIVE  ENABLED  SPY top-100  margin 50%  | Last: ...         │
+│  REBALANCER ● ACTIVE  ENABLED  S&P 500 top-100  margin 50%  | Last: ...     │
 │  [Portfolio chart]                                                           │
 │  ┌─ PORTFOLIO ──────────────────┐  ┌─ OPEN ORDERS ──────────────────────┐  │
 │  │ Symbol  Value   Qty   Chg%   │  │ ID      Side  Symbol  Amount  Status│  │
@@ -23,7 +23,7 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 - **Live portfolio** — holdings, values, quantities, open orders
 - **Manual orders** — market buy and sell for equities, ETFs, and crypto
 - **Portfolio chart** — scrollable price history across all your holdings
-- **Direct index investing** — top N stocks from SPY/QQQ/DIA, market-cap weighted, rebalanced daily
+- **Direct index investing** — top N stocks from S&P 500, NASDAQ-100, or DJIA, market-cap weighted, rebalanced daily
 - **Margin support** — optionally deploy a configurable percentage of your margin capacity as additional buying power
 - **Configurable exclusions** — skip specific tickers from rebalancing entirely
 - **PDT protection** — day-trade ledger prevents selling positions opened the same day
@@ -68,7 +68,7 @@ uv run main.py
 
 ### Layout
 
-```
+```text
 Header (clock)
 Balance Bar       — total equity, buying power (cash / options / crypto)
 Rebalancer Bar    — timer status, active config, key hint strip
@@ -122,17 +122,17 @@ Shows a price history chart for the positions in your portfolio, loaded in a sin
 
 | Asset | Allocation | Notes |
 |-------|-----------|-------|
-| Stocks | 65% | Top N from configured index ETF, market-cap weighted |
+| Stocks | 65% | Top N from configured index, market-cap weighted |
 | BTC | 15% | Bitcoin |
 | ETH | 5% | Ethereum |
 | GLDM | 10% | Gold ETF |
-| SGOV | 5% | 0–3 month T-bills (short-term yield) |
+| Cash | 5% | Uninvested buying power (no orders placed) |
 
 ### How it works
 
 Each run:
 
-1. Scrapes the current constituent list for the configured index from Wikipedia
+1. Fetches the current constituent list for the configured index from official ETF holdings, with Wikipedia as a fallback
 2. Fetches market caps via yfinance (20 parallel workers; results cached up to 20 hours)
 3. Selects the top N by market cap, filters out any excluded tickers, and computes within-slice weights
 4. Fetches the current portfolio from Public.com
@@ -147,7 +147,7 @@ Each run:
 
 When margin investing is enabled on your Public.com account, you can configure what percentage of your available margin capacity the rebalancer uses as **additional** buying power on top of cash:
 
-```
+```text
 investment_base    = total_equity + (margin_usage_pct × margin_capacity)
 effective_bp       = cash_buying_power + (margin_usage_pct × margin_capacity)
 ```
@@ -166,20 +166,20 @@ The settings modal lets you configure without editing any files:
 
 | Field | Description |
 |-------|-------------|
-| **Index ETF ticker** | Determines which constituent list to track (see table below) |
+| **Index to track** | Determines which constituent list to track (see table below) |
 | **Top N stocks** | How many of the top constituents to hold (by market cap). Default: 500 (full index) |
 | **Margin usage** | `0.0` = cash only · `0.5` = 50% of margin capacity · `1.0` = full margin |
 | **Excluded tickers** | Comma-separated symbols to skip entirely (no buys, no sells) |
 
-Supported ETFs (constituent lists are sourced from Wikipedia):
+Supported indexes:
 
-| ETF(s) | Index |
-|--------|-------|
-| `SPY`, `VOO`, `IVV`, `SPLG`, `CSPX` | S&P 500 |
-| `QQQ`, `QQQM`, `ONEQ` | NASDAQ-100 |
-| `DIA` | Dow Jones Industrial Average |
+| Config value | Index |
+|--------------|-------|
+| `SP500` | S&P 500 |
+| `NASDAQ100` | NASDAQ-100 |
+| `DJIA` | Dow Jones Industrial Average |
 
-Any other ticker will be rejected with an error — arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
+Legacy ETF values such as `SPY`, `QQQ`, and `DIA` are migrated automatically. Arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
 
 ### Skipping a run (`x`)
 
@@ -194,12 +194,11 @@ The rebalancer runs as a user-level systemd service — no root access required.
 ### Install
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/public-terminal-rebalance.service ~/.config/systemd/user/
-cp systemd/public-terminal-rebalance.timer    ~/.config/systemd/user/
-systemctl --user daemon-reload
+uv run main.py --install-service
 systemctl --user enable --now public-terminal-rebalance.timer
 ```
+
+The installer writes a service file for the current runtime. Source installs use the active Python interpreter and `main.py`; binary releases use the packaged executable.
 
 The timer fires Mon–Fri at **12:00 ET** (DST-aware). `Persistent=true` means it catches up immediately after a missed run (e.g. system was off at noon).
 
@@ -243,7 +242,7 @@ uv run rebalance.py
 | File | Purpose |
 |------|---------|
 | `.env` | API credentials (access token, account number) |
-| `rebalance_config.json` | ETF, top N, margin %, excluded tickers |
+| `rebalance_config.json` | Index, top N, margin %, excluded tickers, target allocations |
 | `cache/rebalance.log` | Full rebalancer run history |
 | `cache/market_caps.json` | Same-day market cap cache (auto-refreshes) |
 | `cache/today_buys.json` | PDT protection ledger (resets daily) |

@@ -24,11 +24,11 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 Use either command below. Both install the newest GitHub release:
 
 ```bash
-uv tool install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest-py3-none-any.whl
+uv tool install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest.tar.gz
 ```
 
 ```bash
-pipx install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest-py3-none-any.whl
+pipx install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest.tar.gz
 ```
 
 ### Specific release (single command)

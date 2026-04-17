@@ -18,6 +18,7 @@ cache/market_caps.json
 cache/portfolio_cache.json
 cache/rebalance.log
 cache/skip_next_rebalance
+cache/today_buys.json
 
 # Claude Code local settings
 .claude/

@@ -2,9 +2,10 @@
 """
 Portfolio daily rebalancer.
 
-Target allocation
-  65%  Top-250 S&P 500 stocks, market-cap weighted within that slice
-  20%  Bitcoin (BTC)
+Default target allocation (configurable via TUI settings)
+  65%  Top-N index stocks, market-cap weighted within that slice
+  15%  Bitcoin (BTC)
+   5%  Ethereum (ETH)
   10%  Gold via GLDM ETF
    5%  Cash (left uninvested as buying power)
 
@@ -45,20 +46,25 @@ from public_api_sdk import (
 # Allocation config
 # ---------------------------------------------------------------------------
 
-ALLOC_STOCKS = Decimal("0.65")   # top-100 S&P 500, market-cap weighted
-ALLOC_BTC    = Decimal("0.15")   # Bitcoin
-ALLOC_ETH    = Decimal("0.05")   # Ethereum
-ALLOC_GOLD   = Decimal("0.10")   # GLDM ETF (gold)
-ALLOC_SGOV   = Decimal("0.05")   # SGOV ETF (0–3 month T-bills, short-term yield)
+# Default allocations — overridden at runtime by load_allocation_config()
+_DEFAULT_ALLOCS: dict[str, Decimal] = {
+    "stocks": Decimal("0.65"),  # index stocks, market-cap weighted
+    "btc":    Decimal("0.15"),  # Bitcoin
+    "eth":    Decimal("0.05"),  # Ethereum
+    "gold":   Decimal("0.10"),  # GLDM ETF
+    "cash":   Decimal("0.05"),  # uninvested cash (no orders placed)
+}
+# Keep module-level names for use outside rebalance() (dry-run scripts, etc.)
+ALLOC_STOCKS = _DEFAULT_ALLOCS["stocks"]
+ALLOC_BTC    = _DEFAULT_ALLOCS["btc"]
+ALLOC_ETH    = _DEFAULT_ALLOCS["eth"]
+ALLOC_GOLD   = _DEFAULT_ALLOCS["gold"]
 
-assert ALLOC_STOCKS + ALLOC_BTC + ALLOC_ETH + ALLOC_GOLD + ALLOC_SGOV == Decimal("1.00")
-
-SP500_TOP_N     = 100               # take the top N constituents by market cap
+SP500_TOP_N     = 500               # default: full index (capped by actual constituent count)
 GOLD_SYMBOL     = "GLDM"
-SGOV_SYMBOL     = "SGOV"
 BTC_SYMBOL      = "BTC"
 ETH_SYMBOL      = "ETH"
-NON_STOCK_ETFS  = {GOLD_SYMBOL, SGOV_SYMBOL}  # equity symbols excluded from the S&P 500 slice
+NON_STOCK_ETFS  = {GOLD_SYMBOL}     # equity symbols excluded from the S&P 500 slice
 BROKER_TO_YF_SYMBOLS = {
     "BF.B": "BF-B",
     "BRK.B": "BRK-B",
@@ -109,28 +115,92 @@ log = logging.getLogger(__name__)
 # Rebalance config (ETF ticker + top N), read at runtime
 # ---------------------------------------------------------------------------
 
-# ETF tickers grouped by which index/constituent list they represent
-_SP500_ETFS    = {"SPY", "VOO", "IVV", "SPLG", "CSPX"}
-_NASDAQ100_ETFS = {"QQQ", "QQQM", "ONEQ"}
-_DJIA_ETFS     = {"DIA"}
+# Canonical index identifiers used in rebalance_config.json
+_INDEX_SP500    = "SP500"
+_INDEX_NASDAQ100 = "NASDAQ100"
+_INDEX_DJIA     = "DJIA"
+
+# Legacy ETF ticker → index name (for migrating old configs)
+_ETF_TO_INDEX: dict[str, str] = {
+    "SPY": _INDEX_SP500, "VOO": _INDEX_SP500, "IVV": _INDEX_SP500,
+    "SPLG": _INDEX_SP500, "CSPX": _INDEX_SP500,
+    "QQQ": _INDEX_NASDAQ100, "QQQM": _INDEX_NASDAQ100, "ONEQ": _INDEX_NASDAQ100,
+    "DIA": _INDEX_DJIA,
+}
 
 
-def load_rebalance_config() -> tuple[str, int, Decimal]:
-    """Return (etf_ticker, top_n, margin_usage_pct) from rebalance_config.json, with defaults.
+SUPPORTED_INDEXES: dict[str, str] = {
+    _INDEX_SP500:    "S&P 500",
+    _INDEX_NASDAQ100: "NASDAQ-100",
+    _INDEX_DJIA:     "Dow Jones (DJIA)",
+}
 
-    margin_usage_pct controls how much of the margin capacity (buying_power − cash_only_buying_power)
-    is included in the effective buy budget:
-        effective_bp = cash_only_buying_power + margin_usage_pct × margin_capacity
-    0.0 = cash only, 0.5 = 50% of margin, 1.0 = full margin.
+
+def _load_config_json() -> dict:
+    """Load rebalance_config.json once; returns {} on any error."""
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def load_rebalance_config(_cfg: dict | None = None) -> tuple[str, int, Decimal, frozenset[str]]:
+    """Return (index, top_n, margin_usage_pct, excluded_tickers) from rebalance_config.json.
+
+    index is one of: SP500, NASDAQ100, DJIA.
+    Old configs using etf_ticker (SPY, QQQ, DIA, etc.) are migrated automatically.
+
+    margin_usage_pct: 0.0 = cash only, 0.5 = 50% of margin capacity, 1.0 = full margin.
+    excluded_tickers: symbols skipped entirely — no buys, no sells.
+    _cfg: pre-loaded config dict (avoids a second file read when called alongside load_allocation_config).
     """
     try:
-        cfg = json.loads(CONFIG_FILE.read_text())
-        etf_ticker = str(cfg.get("etf_ticker", "SPY")).upper().strip()
+        cfg = _cfg if _cfg is not None else _load_config_json()
+        # Prefer new "index" key; fall back to legacy "etf_ticker" and migrate
+        if "index" in cfg:
+            index = str(cfg["index"]).upper().strip()
+        else:
+            legacy = str(cfg.get("etf_ticker", "SPY")).upper().strip()
+            index = _ETF_TO_INDEX.get(legacy, _INDEX_SP500)
+        if index not in SUPPORTED_INDEXES:
+            index = _INDEX_SP500
         top_n = int(cfg.get("top_n", SP500_TOP_N))
         margin_usage_pct = Decimal(str(cfg.get("margin_usage_pct", "0.5"))).max(Decimal("0")).min(Decimal("1"))
-        return etf_ticker, max(1, top_n), margin_usage_pct
-    except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError):
-        return "SPY", SP500_TOP_N, Decimal("0.5")
+        excluded_tickers = frozenset(
+            str(t).upper().strip()
+            for t in cfg.get("excluded_tickers", [])
+            if str(t).strip()
+        )
+        return index, max(1, top_n), margin_usage_pct, excluded_tickers
+    except (ValueError, KeyError):
+        return _INDEX_SP500, SP500_TOP_N, Decimal("0.5"), frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Allocation config
+# ---------------------------------------------------------------------------
+
+def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
+    """Return allocation fractions from rebalance_config.json.
+
+    Keys: stocks, btc, eth, gold, cash.  Values sum to 1.0.
+    'cash' is the uninvested fraction — no orders are placed for it.
+    Falls back to _DEFAULT_ALLOCS if the config is missing, invalid, or doesn't sum to 1.
+    _cfg: pre-loaded config dict (avoids a second file read when called alongside load_rebalance_config).
+    """
+    try:
+        cfg = _cfg if _cfg is not None else _load_config_json()
+        raw = cfg.get("allocations", {})
+        if not raw:
+            return _DEFAULT_ALLOCS.copy()
+        allocs = {k: Decimal(str(raw.get(k, _DEFAULT_ALLOCS[k]))) for k in _DEFAULT_ALLOCS}
+        total = sum(allocs.values())
+        if abs(total - Decimal("1.00")) > Decimal("0.005"):
+            log.warning("Allocations sum to %.4f (not 1.0) — using defaults.", total)
+            return _DEFAULT_ALLOCS.copy()
+        return allocs
+    except Exception:
+        return _DEFAULT_ALLOCS.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -168,83 +238,178 @@ def record_today_buys(symbols: set[str]) -> None:
 # Index constituents
 # ---------------------------------------------------------------------------
 
-def _fetch_sp500_tickers() -> list[str]:
-    """Scrape the current S&P 500 constituent list from Wikipedia."""
-    log.info("Fetching S&P 500 constituent list from Wikipedia…")
-    req = urllib.request.Request(
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        headers={"User-Agent": "Mozilla/5.0 (compatible; public-terminal/1.0)"},
+_UA = "Mozilla/5.0 (compatible; public-terminal/1.0)"
+
+
+def _fetch_bytes(url: str, extra_headers: dict | None = None) -> bytes:
+    """Fetch URL with a shared User-Agent, returning raw bytes."""
+    headers = {"User-Agent": _UA, **(extra_headers or {})}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+def _clean_tickers(raw: list) -> list[str]:
+    """Strip whitespace and drop empty / placeholder values from a ticker list."""
+    return [str(t).strip() for t in raw if isinstance(t, str) and str(t).strip() not in ("", "-", "N/A")]
+
+
+# --- official sources ---
+
+def _fetch_sp500_tickers_official() -> list[str]:
+    """Fetch S&P 500 constituents from iShares IVV daily holdings CSV.
+
+    iShares CSV structure: 9 metadata rows, then a header row, then data.
+    We keep only rows where Asset Class == "Equity" to drop cash/futures lines.
+    """
+    url = (
+        "https://www.ishares.com/us/products/239726/ISHARES-CORE-SP-500-ETF"
+        "/1467271812596.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund"
     )
-    with urllib.request.urlopen(req) as resp:
-        html = resp.read().decode("utf-8")
+    content = _fetch_bytes(url).decode("utf-8")
+    df = pd.read_csv(io.StringIO(content), skiprows=9)
+    if "Asset Class" in df.columns:
+        df = df[df["Asset Class"].str.contains("Equity", na=False)]
+    return _clean_tickers(df["Ticker"].tolist())
+
+
+def _fetch_nasdaq100_tickers_official() -> list[str]:
+    """Fetch NASDAQ-100 constituents from Invesco QQQ holdings JSON API.
+
+    The API returns all holdings including index futures (securityTypeCode=IFUT)
+    and cash entries — we filter to equity-only rows.
+    """
+    url = (
+        "https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses"
+        "/QQQ/holdings/fund?idType=ticker&productType=ETF"
+    )
+    data = json.loads(_fetch_bytes(url, {"Referer": "https://www.invesco.com/qqq-etf/en/about.html"}).decode("utf-8"))
+    tickers = [
+        h["ticker"] for h in data["holdings"]
+        if h.get("ticker")
+        and h.get("securityTypeCode") not in ("IFUT", "CASH", "FXFWD")
+        and str(h["ticker"]).replace(".", "").isalpha()
+    ]
+    return _clean_tickers(tickers)
+
+
+def _fetch_djia_tickers_official() -> list[str]:
+    """Fetch DJIA constituents from SSGA DIA daily holdings xlsx.
+
+    SSGA xlsx structure: 4 metadata rows, then a header row (Name, Ticker, ...),
+    then data. We skip 4 rows so row 4 becomes the column header.
+    """
+    url = (
+        "https://www.ssga.com/us/en/intermediary/etfs/library-content/products"
+        "/fund-data/etfs/us/holdings-daily-us-en-dia.xlsx"
+    )
+    df = pd.read_excel(io.BytesIO(_fetch_bytes(url, {"Referer": "https://www.ssga.com/"})), skiprows=4, engine="openpyxl")
+    return _clean_tickers(df["Ticker"].tolist())
+
+
+# --- Wikipedia fallbacks ---
+
+def _fetch_sp500_tickers_wikipedia() -> list[str]:
+    """Scrape the S&P 500 constituent list from Wikipedia (fallback)."""
+    log.info("  Falling back to Wikipedia for S&P 500 constituents…")
+    html = _fetch_bytes("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies").decode("utf-8")
     tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
-    tickers = tables[0]["Symbol"].tolist()
-    log.info("  → %d constituents", len(tickers))
-    return tickers
+    return _clean_tickers(tables[0]["Symbol"].tolist())
 
 
-def _fetch_nasdaq100_tickers() -> list[str]:
-    """Scrape the current NASDAQ-100 constituent list from Wikipedia."""
-    log.info("Fetching NASDAQ-100 constituent list from Wikipedia…")
-    req = urllib.request.Request(
-        "https://en.wikipedia.org/wiki/Nasdaq-100",
-        headers={"User-Agent": "Mozilla/5.0 (compatible; public-terminal/1.0)"},
-    )
-    with urllib.request.urlopen(req) as resp:
-        html = resp.read().decode("utf-8")
+def _fetch_nasdaq100_tickers_wikipedia() -> list[str]:
+    """Scrape the NASDAQ-100 constituent list from Wikipedia (fallback)."""
+    log.info("  Falling back to Wikipedia for NASDAQ-100 constituents…")
+    html = _fetch_bytes("https://en.wikipedia.org/wiki/Nasdaq-100").decode("utf-8")
     tables = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})
     df = tables[0]
     col = "Ticker" if "Ticker" in df.columns else "Symbol"
-    tickers = [t for t in df[col].tolist() if isinstance(t, str)]
-    log.info("  → %d constituents", len(tickers))
-    return tickers
+    return _clean_tickers(df[col].tolist())
 
 
-def _fetch_djia_tickers() -> list[str]:
-    """Scrape the current Dow Jones constituent list from Wikipedia."""
-    log.info("Fetching Dow Jones constituent list from Wikipedia…")
-    req = urllib.request.Request(
-        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
-        headers={"User-Agent": "Mozilla/5.0 (compatible; public-terminal/1.0)"},
-    )
-    with urllib.request.urlopen(req) as resp:
-        html = resp.read().decode("utf-8")
+def _fetch_djia_tickers_wikipedia() -> list[str]:
+    """Scrape the DJIA constituent list from Wikipedia (fallback)."""
+    log.info("  Falling back to Wikipedia for DJIA constituents…")
+    html = _fetch_bytes("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average").decode("utf-8")
     tables = pd.read_html(io.StringIO(html))
     for df in tables:
         for col in ("Symbol", "Ticker"):
             if col in df.columns:
-                tickers = [t for t in df[col].tolist()
-                           if isinstance(t, str) and t.replace(".", "").isalpha()]
+                tickers = _clean_tickers(
+                    [t for t in df[col].tolist() if isinstance(t, str) and t.replace(".", "").isalpha()]
+                )
                 if len(tickers) >= 20:
-                    log.info("  → %d constituents", len(tickers))
                     return tickers
-    raise RuntimeError("Could not find Dow Jones constituent table on Wikipedia")
+    raise RuntimeError("Could not find DJIA constituent table on Wikipedia")
 
 
-def fetch_constituents(etf_ticker: str) -> list[str]:
-    """Return the index constituent list for the given ETF ticker."""
-    if etf_ticker in _NASDAQ100_ETFS:
+# --- public fetch functions ---
+
+def _fetch_sp500_tickers() -> list[str]:
+    log.info("Fetching S&P 500 constituents (iShares IVV)…")
+    try:
+        tickers = _fetch_sp500_tickers_official()
+        log.info("  → %d constituents", len(tickers))
+        return tickers
+    except Exception as exc:
+        log.warning("iShares fetch failed (%s) — falling back to Wikipedia.", exc)
+        tickers = _fetch_sp500_tickers_wikipedia()
+        log.info("  → %d constituents (Wikipedia)", len(tickers))
+        return tickers
+
+
+def _fetch_nasdaq100_tickers() -> list[str]:
+    log.info("Fetching NASDAQ-100 constituents (Invesco QQQ)…")
+    try:
+        tickers = _fetch_nasdaq100_tickers_official()
+        log.info("  → %d constituents", len(tickers))
+        return tickers
+    except Exception as exc:
+        log.warning("Invesco fetch failed (%s) — falling back to Wikipedia.", exc)
+        tickers = _fetch_nasdaq100_tickers_wikipedia()
+        log.info("  → %d constituents (Wikipedia)", len(tickers))
+        return tickers
+
+
+def _fetch_djia_tickers() -> list[str]:
+    log.info("Fetching DJIA constituents (SSGA DIA)…")
+    try:
+        tickers = _fetch_djia_tickers_official()
+        log.info("  → %d constituents", len(tickers))
+        return tickers
+    except Exception as exc:
+        log.warning("SSGA fetch failed (%s) — falling back to Wikipedia.", exc)
+        tickers = _fetch_djia_tickers_wikipedia()
+        log.info("  → %d constituents (Wikipedia)", len(tickers))
+        return tickers
+
+
+def fetch_constituents(index: str) -> list[str]:
+    """Return the constituent list for the given index identifier (SP500 / NASDAQ100 / DJIA)."""
+    if index == _INDEX_NASDAQ100:
         return _fetch_nasdaq100_tickers()
-    if etf_ticker in _DJIA_ETFS:
+    if index == _INDEX_DJIA:
         return _fetch_djia_tickers()
-    # Default: S&P 500 (SPY, VOO, IVV, SPLG, or any unrecognised ticker)
-    if etf_ticker not in _SP500_ETFS:
-        log.warning("Unrecognised ETF '%s' — falling back to S&P 500 constituents.", etf_ticker)
-    return _fetch_sp500_tickers()
+    if index == _INDEX_SP500:
+        return _fetch_sp500_tickers()
+    raise ValueError(
+        f"Unsupported index '{index}'. Supported values: {', '.join(SUPPORTED_INDEXES)}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Market caps (daily cache, parallel fetch)
 # ---------------------------------------------------------------------------
 
-def _load_market_cap_cache(etf_ticker: str) -> dict[str, float] | None:
+def _load_market_cap_cache(index: str) -> dict[str, float] | None:
     if not MARKET_CAP_CACHE_FILE.exists():
         return None
     try:
         data = json.loads(MARKET_CAP_CACHE_FILE.read_text())
-        cached_etf = data.get("etf_ticker", "SPY")
-        if cached_etf != etf_ticker:
-            log.info("ETF changed (%s → %s) — discarding market cap cache.", cached_etf, etf_ticker)
+        # Support both new "index" key and legacy "etf_ticker" key in cache
+        cached_raw = data.get("index") or _ETF_TO_INDEX.get(data.get("etf_ticker", ""), _INDEX_SP500)
+        if cached_raw != index:
+            log.info("Index changed (%s → %s) — discarding market cap cache.", cached_raw, index)
             return None
         age = datetime.now() - datetime.fromisoformat(data["updated_at"])
         if age > timedelta(hours=MARKET_CAP_CACHE_MAX_AGE_HOURS):
@@ -262,9 +427,9 @@ def _load_market_cap_cache(etf_ticker: str) -> dict[str, float] | None:
         return None
 
 
-def _save_market_cap_cache(caps: dict[str, float], etf_ticker: str) -> None:
+def _save_market_cap_cache(caps: dict[str, float], index: str) -> None:
     MARKET_CAP_CACHE_FILE.write_text(
-        json.dumps({"updated_at": datetime.now().isoformat(), "etf_ticker": etf_ticker, "caps": caps}, indent=2)
+        json.dumps({"updated_at": datetime.now().isoformat(), "index": index, "caps": caps}, indent=2)
     )
     log.info("Market cap cache saved (%d entries).", len(caps))
 
@@ -282,14 +447,14 @@ def _fetch_one_market_cap(ticker: str) -> tuple[str, float | None]:
     return ticker, None
 
 
-def fetch_market_caps(tickers: list[str], etf_ticker: str) -> dict[str, float]:
+def fetch_market_caps(tickers: list[str], index: str) -> dict[str, float]:
     """
     Return {ticker: market_cap} for the given tickers.
     Same-day results are served from a local cache; otherwise fetched in parallel
     using fast_info (~30–60 s for 500 stocks with 20 workers).
-    Cache is invalidated automatically when etf_ticker changes.
+    Cache is invalidated automatically when the index changes.
     """
-    cached = _load_market_cap_cache(etf_ticker)
+    cached = _load_market_cap_cache(index)
     if cached is not None:
         return cached
 
@@ -308,7 +473,7 @@ def fetch_market_caps(tickers: list[str], etf_ticker: str) -> dict[str, float]:
                 log.info("  … %d / %d done", done, len(tickers))
 
     log.info("  → market caps for %d / %d tickers", len(caps), len(tickers))
-    _save_market_cap_cache(caps, etf_ticker)
+    _save_market_cap_cache(caps, index)
     return caps
 
 
@@ -697,11 +862,20 @@ def compute_unallocated_buy_delta(
 def rebalance() -> None:
     log.info("=" * 64)
     log.info("PORTFOLIO REBALANCE  —  %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    log.info("  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% gold  |  %.0f%% SGOV",
-             ALLOC_STOCKS * 100, ALLOC_BTC * 100, ALLOC_ETH * 100, ALLOC_GOLD * 100, ALLOC_SGOV * 100)
-    etf_ticker, top_n, margin_usage_pct = load_rebalance_config()
-    log.info("  Index ETF: %s — top %d by market cap", etf_ticker, top_n)
+    _cfg = _load_config_json()
+    index, top_n, margin_usage_pct, excluded_tickers = load_rebalance_config(_cfg)
+    alloc = load_allocation_config(_cfg)
+    alloc_stocks = alloc["stocks"]
+    alloc_btc    = alloc["btc"]
+    alloc_eth    = alloc["eth"]
+    alloc_gold   = alloc["gold"]
+    alloc_cash   = alloc["cash"]
+    log.info("  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% gold  |  %.0f%% cash",
+             alloc_stocks * 100, alloc_btc * 100, alloc_eth * 100, alloc_gold * 100, alloc_cash * 100)
+    log.info("  Index: %s (%s) — top %d by market cap", index, SUPPORTED_INDEXES.get(index, index), top_n)
     log.info("  Margin usage: %.0f%% of margin capacity", margin_usage_pct * 100)
+    if excluded_tickers:
+        log.info("  Excluded tickers (%d): %s", len(excluded_tickers), ", ".join(sorted(excluded_tickers)))
     log.info("=" * 64)
 
     if SKIP_FILE.exists():
@@ -709,9 +883,14 @@ def rebalance() -> None:
         log.info("SKIPPED — skip sentinel was set. Removed sentinel; next run will proceed normally.")
         return
 
-    constituents = fetch_constituents(etf_ticker)
-    market_caps = fetch_market_caps(constituents, etf_ticker)
-    top_stocks = top_n_by_market_cap(constituents, market_caps, top_n)
+    constituents = fetch_constituents(index)
+    market_caps = fetch_market_caps(constituents, index)
+    _top_stocks_raw = top_n_by_market_cap(constituents, market_caps, top_n)
+    top_stocks = [t for t in _top_stocks_raw if t not in excluded_tickers]
+    if excluded_tickers:
+        filtered_out = excluded_tickers & set(_top_stocks_raw)
+        if filtered_out:
+            log.info("  Excluded from top-%d: %s", top_n, ", ".join(sorted(filtered_out)))
     stock_weights = compute_stock_weights(top_stocks, market_caps)
 
     log.info("Fetching portfolio from Public.com…")
@@ -733,7 +912,6 @@ def rebalance() -> None:
 
         sells: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
         buys:  list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
-        stock_residual_for_sgov = Decimal("0")
 
         today_buys = load_today_buys()
         if today_buys:
@@ -752,21 +930,23 @@ def rebalance() -> None:
             else:
                 buys.append(order)
 
-        log.info("--- Computing stock deltas (%s top-%d) ---", etf_ticker, top_n)
+        log.info("--- Computing stock deltas (%s top-%d) ---", index, top_n)
         all_stock_symbols = set(top_stocks) | {
             s for s in equity_pos if s not in NON_STOCK_ETFS and s not in top_stocks
         }
         for symbol in all_stock_symbols:
             if symbol in NON_STOCK_ETFS:
                 continue
+            if symbol in excluded_tickers:
+                log.info("  Skipping %s — excluded by config.", symbol)
+                continue
             weight = stock_weights.get(symbol, Decimal("0"))
-            target = (weight * ALLOC_STOCKS * investment_base).quantize(Decimal("0.01"))
+            target = (weight * alloc_stocks * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
-            stock_residual_for_sgov += compute_unallocated_buy_delta(target, current, Decimal("1.00"))
             queue(compute_delta(symbol, InstrumentType.EQUITY, target, current, Decimal("1.00")))
 
-        def queue_etf_delta(symbol: str, alloc: Decimal, extra_target: Decimal = Decimal("0")) -> None:
-            target  = ((alloc * investment_base) + extra_target).quantize(Decimal("0.01"))
+        def queue_etf_delta(symbol: str, alloc_pct: Decimal) -> None:
+            target  = (alloc_pct * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
             log.info("  %s  target=$%.2f  current=$%.2f  delta=$%.2f",
                      symbol, target, current, target - current)
@@ -780,23 +960,22 @@ def rebalance() -> None:
             eth_price = eth_future.result()
 
         log.info("--- Computing BTC delta ---")
-        btc_target  = (ALLOC_BTC * investment_base).quantize(Decimal("0.01"))
+        btc_target  = (alloc_btc * investment_base).quantize(Decimal("0.01"))
         btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
         log.info("  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
                  btc_price, btc_target, btc_current, btc_target - btc_current)
         queue(compute_delta(BTC_SYMBOL, InstrumentType.CRYPTO, btc_target, btc_current, Decimal("1.00")))
 
         log.info("--- Computing ETH delta ---")
-        eth_target  = (ALLOC_ETH * investment_base).quantize(Decimal("0.01"))
+        eth_target  = (alloc_eth * investment_base).quantize(Decimal("0.01"))
         eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
         log.info("  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
                  eth_price, eth_target, eth_current, eth_target - eth_current)
         queue(compute_delta(ETH_SYMBOL, InstrumentType.CRYPTO, eth_target, eth_current, Decimal("1.00")))
 
-        log.info("--- Computing GLDM / SGOV deltas ---")
-        queue_etf_delta(GOLD_SYMBOL, ALLOC_GOLD)
-        log.info("  Residual stock allocation too small to trade directly: $%.2f", stock_residual_for_sgov)
-        queue_etf_delta(SGOV_SYMBOL, ALLOC_SGOV, extra_target=stock_residual_for_sgov)
+        log.info("--- Computing GLDM delta ---")
+        queue_etf_delta(GOLD_SYMBOL, alloc_gold)
+        log.info("  Cash allocation (%.0f%%) stays uninvested — no order placed.", alloc_cash * 100)
 
         sells.sort(key=lambda order: (order[3], order[0]), reverse=True)
         buys.sort(key=lambda order: (order[3], order[0]), reverse=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -50,6 +51,30 @@ INSTRUMENT_OPTIONS = [
 _HINT = "  |  [r] Refresh  [b] Buy  [s] Sell  [c] Cancel  [q] Quit"
 
 PORTFOLIO_CACHE = Path(__file__).parent / "cache" / "portfolio_cache.json"
+ENV_FILE        = Path(__file__).parent / ".env"
+
+
+def _credentials_present() -> bool:
+    """Return True if both required env vars are set (from .env or the environment)."""
+    from dotenv import load_dotenv
+    load_dotenv(ENV_FILE)
+    return bool(os.environ.get("PUBLIC_ACCESS_TOKEN") and os.environ.get("PUBLIC_ACCOUNT_NUMBER"))
+
+
+def _write_env(access_token: str, account_number: str) -> None:
+    """Write (or overwrite) PUBLIC_ACCESS_TOKEN and PUBLIC_ACCOUNT_NUMBER in .env."""
+    lines: list[str] = []
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            key = line.split("=", 1)[0].strip()
+            if key not in ("PUBLIC_ACCESS_TOKEN", "PUBLIC_ACCOUNT_NUMBER"):
+                lines.append(line)
+    lines.append(f"PUBLIC_ACCESS_TOKEN={access_token}")
+    lines.append(f"PUBLIC_ACCOUNT_NUMBER={account_number}")
+    ENV_FILE.write_text("\n".join(lines) + "\n")
+    # Reload so the running process picks them up immediately
+    os.environ["PUBLIC_ACCESS_TOKEN"] = access_token
+    os.environ["PUBLIC_ACCOUNT_NUMBER"] = account_number
 
 CHART_PERIODS = [
     ("1D", "1d",  "5m"),
@@ -64,6 +89,10 @@ YF_TICKERS = {"BTC": "BTC-USD", "ETH": "ETH-USD"}
 
 TIMER_UNIT             = "public-terminal-rebalance.timer"
 SERVICE_UNIT           = "public-terminal-rebalance.service"
+_ACTIVE_ORDER_STATUSES = {
+    OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED,
+    OrderStatus.PENDING_REPLACE, OrderStatus.PENDING_CANCEL,
+}
 SKIP_FILE              = Path(__file__).parent / "cache" / "skip_next_rebalance"
 REBALANCE_CONFIG_FILE  = Path(__file__).parent / "rebalance_config.json"
 
@@ -72,16 +101,107 @@ def _load_rebalance_config() -> dict:
     try:
         return json.loads(REBALANCE_CONFIG_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"etf_ticker": "SPY", "top_n": 100}
+        return {"index": "SP500", "top_n": 500}
 
 
-def _save_rebalance_config(etf_ticker: str, top_n: int, margin_usage_pct: float) -> None:
+def _save_rebalance_config(
+    index: str,
+    top_n: int,
+    margin_usage_pct: float,
+    excluded_tickers: list[str],
+    allocations: dict[str, float],
+) -> None:
     REBALANCE_CONFIG_FILE.write_text(
-        json.dumps({"etf_ticker": etf_ticker, "top_n": top_n, "margin_usage_pct": margin_usage_pct}, indent=2)
+        json.dumps({
+            "index": index,
+            "top_n": top_n,
+            "margin_usage_pct": margin_usage_pct,
+            "excluded_tickers": sorted(set(t.upper().strip() for t in excluded_tickers if t.strip())),
+            "allocations": allocations,
+        }, indent=2)
     )
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# First-run setup modal
+# ---------------------------------------------------------------------------
+
+class SetupModal(ModalScreen[bool]):
+    """Shown on first launch when credentials are missing. Writes .env on save."""
+
+    DEFAULT_CSS = """
+    SetupModal {
+        align: center middle;
+    }
+    #setup-dialog {
+        width: 72;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #setup-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+        color: $warning;
+    }
+    #setup-intro {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #setup-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #setup-btn-save {
+        margin-right: 2;
+    }
+    """
+
+    _INTRO = (
+        "No credentials found. Enter your Public.com API details below.\n"
+        "They will be saved to .env in the project directory."
+    )
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="setup-dialog"):
+            yield Label("WELCOME TO PUBLIC TERMINAL", id="setup-title")
+            yield Label(self._INTRO, id="setup-intro")
+            yield Label("API Access Token  (Settings → API → Secret Key)", classes="field-label")
+            yield Input(placeholder="your-access-token", password=True, id="input-token")
+            yield Label("Account Number  (e.g. 5OP95222)", classes="field-label")
+            yield Input(placeholder="e.g. 5OP95222", id="input-account")
+            with Horizontal(id="setup-btn-row"):
+                yield Button("Save & Continue", variant="success", id="setup-btn-save")
+                yield Button("Quit", variant="error", id="setup-btn-quit")
+
+    @on(Button.Pressed, "#setup-btn-quit")
+    def do_quit(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#setup-btn-save")
+    def do_save(self) -> None:
+        token   = self.query_one("#input-token",   Input).value.strip()
+        account = self.query_one("#input-account", Input).value.strip().upper()
+        if not token:
+            self.query_one("#input-token", Input).focus()
+            return
+        if not account:
+            self.query_one("#input-account", Input).focus()
+            return
+        _write_env(token, account)
+        self.dismiss(True)
+
+
 # Order entry modal
 # ---------------------------------------------------------------------------
 
@@ -273,25 +393,20 @@ class RunNowModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 
 class RebalanceConfigModal(ModalScreen):
-    """Modal for configuring the index ETF and top-N stock count."""
-
-    _SUPPORTED = (
-        "S&P 500:    SPY  VOO  IVV  SPLG\n"
-        "NASDAQ-100: QQQ  QQQM\n"
-        "Dow Jones:  DIA\n"
-        "Other tickers fall back to S&P 500."
-    )
+    """Modal for configuring the rebalancer."""
 
     DEFAULT_CSS = """
     RebalanceConfigModal {
         align: center middle;
     }
     #cfg-dialog {
-        width: 64;
+        width: 72;
         height: auto;
+        max-height: 90vh;
         border: thick $primary;
         background: $surface;
         padding: 1 2;
+        overflow-y: auto;
     }
     #cfg-title {
         text-align: center;
@@ -299,14 +414,20 @@ class RebalanceConfigModal(ModalScreen):
         height: 1;
         margin-bottom: 1;
     }
-    #cfg-hint {
-        color: $text-muted;
-        margin-bottom: 1;
+    #cfg-section-index, #cfg-section-margin, #cfg-section-alloc {
+        text-style: bold;
+        margin-top: 1;
+        color: $primary;
+        height: 1;
     }
     .field-label {
         height: 1;
         margin-top: 1;
         color: $text-muted;
+    }
+    #alloc-sum {
+        height: 1;
+        margin-top: 1;
     }
     #cfg-btn-row {
         margin-top: 1;
@@ -318,25 +439,88 @@ class RebalanceConfigModal(ModalScreen):
     }
     """
 
-    def __init__(self, current_etf: str, current_top_n: int, current_margin_pct: float) -> None:
+    _ALLOC_INPUTS = ("input-stocks", "input-btc", "input-eth", "input-gold", "input-cash")
+
+    def __init__(
+        self,
+        current_index: str,
+        current_top_n: int,
+        current_margin_pct: float,
+        current_excluded: list[str],
+        current_allocs: dict[str, float],
+    ) -> None:
         super().__init__()
-        self._current_etf = current_etf
+        self._current_index = current_index
         self._current_top_n = current_top_n
         self._current_margin_pct = current_margin_pct
+        self._current_excluded = current_excluded
+        self._current_allocs = current_allocs
 
     def compose(self) -> ComposeResult:
+        from rebalance import SUPPORTED_INDEXES
+        a = self._current_allocs
+        excluded_str = ", ".join(sorted(self._current_excluded))
+        index_options = [(label, key) for key, label in SUPPORTED_INDEXES.items()]
         with Grid(id="cfg-dialog"):
             yield Label("REBALANCE SETTINGS", id="cfg-title")
-            yield Label(self._SUPPORTED, id="cfg-hint")
-            yield Label("Index ETF ticker", classes="field-label")
-            yield Input(value=self._current_etf, id="input-etf")
-            yield Label("Top N stocks", classes="field-label")
+
+            yield Label("─── Index & Stocks ───────────────────────────────────", id="cfg-section-index")
+            yield Label("Index to track", classes="field-label")
+            yield Select(index_options, value=self._current_index, id="select-index")
+            yield Label("Top N stocks by market cap  (default: full index)", classes="field-label")
             yield Input(value=str(self._current_top_n), id="input-top-n")
-            yield Label("Margin usage (0.0 = cash only, 0.5 = 50% of margin, 1.0 = full)", classes="field-label")
+            yield Label("Excluded tickers  (comma-separated, leave blank for none)", classes="field-label")
+            yield Input(value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded")
+
+            yield Label("─── Margin ───────────────────────────────────────────", id="cfg-section-margin")
+            yield Label("Margin usage  (0.0 = cash only · 0.5 = 50% of margin · 1.0 = full)", classes="field-label")
             yield Input(value=str(self._current_margin_pct), id="input-margin")
+
+            yield Label("─── Target Allocation (must sum to 100%) ─────────────", id="cfg-section-alloc")
+            yield Label("Stocks %", classes="field-label")
+            yield Input(value=str(round(a.get("stocks", 0.65) * 100)), id="input-stocks")
+            yield Label("Bitcoin (BTC) %", classes="field-label")
+            yield Input(value=str(round(a.get("btc", 0.15) * 100)), id="input-btc")
+            yield Label("Ethereum (ETH) %", classes="field-label")
+            yield Input(value=str(round(a.get("eth", 0.05) * 100)), id="input-eth")
+            yield Label("Gold (GLDM) %", classes="field-label")
+            yield Input(value=str(round(a.get("gold", 0.10) * 100)), id="input-gold")
+            yield Label("Cash (uninvested buying power) %", classes="field-label")
+            yield Input(value=str(round(a.get("cash", 0.05) * 100)), id="input-cash")
+            yield Label("", id="alloc-sum")
+
             with Horizontal(id="cfg-btn-row"):
                 yield Button("Save", variant="success", id="cfg-btn-save")
                 yield Button("Cancel", variant="default", id="cfg-btn-cancel")
+
+    def on_mount(self) -> None:
+        self._update_sum()
+
+    def _parse_alloc_inputs(self) -> tuple[dict[str, int], int]:
+        """Return ({key: int_pct}, total) from the five allocation inputs."""
+        values: dict[str, int] = {}
+        for input_id in self._ALLOC_INPUTS:
+            key = input_id.removeprefix("input-")
+            try:
+                values[key] = int(self.query_one(f"#{input_id}", Input).value.strip())
+            except ValueError:
+                values[key] = 0
+        return values, sum(values.values())
+
+    def _update_sum(self) -> None:
+        _, total = self._parse_alloc_inputs()
+        label = self.query_one("#alloc-sum", Label)
+        if total == 100:
+            label.update(f"  Total: {total}%  ✓")
+            label.styles.color = "green"
+        else:
+            label.update(f"  Total: {total}%  — must equal 100%")
+            label.styles.color = "red"
+
+    @on(Input.Changed)
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id in self._ALLOC_INPUTS:
+            self._update_sum()
 
     @on(Button.Pressed, "#cfg-btn-cancel")
     def cancel(self) -> None:
@@ -344,12 +528,10 @@ class RebalanceConfigModal(ModalScreen):
 
     @on(Button.Pressed, "#cfg-btn-save")
     def save(self) -> None:
-        etf = self.query_one("#input-etf", Input).value.strip().upper()
+        index = self.query_one("#select-index", Select).value
         top_n_str = self.query_one("#input-top-n", Input).value.strip()
         margin_str = self.query_one("#input-margin", Input).value.strip()
-        if not etf:
-            self.query_one("#input-etf", Input).focus()
-            return
+        excluded_raw = self.query_one("#input-excluded", Input).value
         try:
             top_n = int(top_n_str)
             if top_n < 1:
@@ -364,7 +546,19 @@ class RebalanceConfigModal(ModalScreen):
         except ValueError:
             self.query_one("#input-margin", Input).focus()
             return
-        self.dismiss({"etf_ticker": etf, "top_n": top_n, "margin_usage_pct": margin_pct})
+        alloc_pcts, total = self._parse_alloc_inputs()
+        if total != 100:
+            self.query_one("#input-stocks", Input).focus()
+            return
+        allocations = {k: round(v / 100, 4) for k, v in alloc_pcts.items()}
+        excluded = [t.upper().strip() for t in excluded_raw.split(",") if t.strip()]
+        self.dismiss({
+            "index": index,
+            "top_n": top_n,
+            "margin_usage_pct": margin_pct,
+            "excluded_tickers": excluded,
+            "allocations": allocations,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -419,10 +613,12 @@ class RebalancerBar(Static):
         last_run: str,
         next_run: str,
         skip_pending: bool = False,
-        etf_ticker: str = "SPY",
-        top_n: int = 100,
+        index: str = "SP500",
+        top_n: int = 500,
         margin_usage_pct: float = 0.5,
+        excluded_count: int = 0,
     ) -> None:
+        from rebalance import SUPPORTED_INDEXES
         t = Text()
         t.append("  REBALANCER ", style="bold magenta")
         if active is None:
@@ -440,7 +636,9 @@ class RebalancerBar(Static):
             t.append("DISABLED", style="dim")
         if skip_pending:
             t.append("  ⚠ NEXT RUN SKIPPED", style="bold yellow")
-        t.append(f"  {etf_ticker} top-{top_n}  margin {int(margin_usage_pct * 100)}%", style="bold white")
+        index_label = SUPPORTED_INDEXES.get(index, index)
+        excl_str = f"  excl {excluded_count}" if excluded_count else ""
+        t.append(f"  {index_label} top-{top_n}  margin {int(margin_usage_pct * 100)}%{excl_str}", style="bold white")
         t.append(f"  |  Last: {last_run}  Next: {next_run}", style="dim")
         t.append("  |  [t] Start/Stop  [e] Enable/Disable  [x] Skip Next  [R] Run Now  [S] Settings", style="dim")
         self.update(t)
@@ -619,12 +817,8 @@ class OrdersTable(DataTable):
 
     def refresh_from_orders(self, orders) -> None:
         self.clear()
-        active_statuses = {
-            OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED,
-            OrderStatus.PENDING_REPLACE, OrderStatus.PENDING_CANCEL,
-        }
         for order in orders:
-            if order.status not in active_statuses:
+            if order.status not in _ACTIVE_ORDER_STATUSES:
                 continue
             side = order.side.value
             sym = order.instrument.symbol
@@ -713,6 +907,19 @@ class PublicTerminal(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        if not _credentials_present():
+            self.push_screen(SetupModal(), self._handle_setup)
+        else:
+            self._start_loading()
+
+    def _handle_setup(self, saved: bool) -> None:
+        if not saved:
+            self.exit()
+            return
+        self.query_one(StatusBar).set_status("  Credentials saved to .env — connecting…" + _HINT)
+        self._start_loading()
+
+    def _start_loading(self) -> None:
         self._load_portfolio_cache()
         self.query_one(StatusBar).set_status("  Connecting…" + _HINT)
         self.load_portfolio()
@@ -771,7 +978,13 @@ class PublicTerminal(App):
                 self._client.close()
             except Exception:
                 pass
-        os._exit(0)
+        # Give Textual 3 seconds to restore the terminal (alternate screen, cursor,
+        # raw mode) via its normal exit path. If background threads block shutdown
+        # past the deadline, the SIGALRM handler force-kills with os._exit so the
+        # shell is never left in a broken state.
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(0))
+        signal.alarm(3)
+        self.exit()
 
     def on_unmount(self) -> None:
         if self._client is not None:
@@ -822,7 +1035,8 @@ class PublicTerminal(App):
         self.call_from_thread(
             self.query_one(RebalancerBar).update_status,
             active, enabled, last_run, next_run, skip_pending,
-            cfg.get("etf_ticker", "SPY"), cfg.get("top_n", 100), cfg.get("margin_usage_pct", 0.5),
+            cfg.get("index", "SP500"), cfg.get("top_n", 500), cfg.get("margin_usage_pct", 0.5),
+            len(cfg.get("excluded_tickers", [])),
         )
 
     @work(thread=True)
@@ -860,13 +1074,9 @@ class PublicTerminal(App):
                     "gain": gain_str,
                     "gain_positive": gain_positive,
                 })
-            active_statuses = {
-                OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED,
-                OrderStatus.PENDING_REPLACE, OrderStatus.PENDING_CANCEL,
-            }
             orders_data: list[dict] = []
             for order in portfolio.orders:
-                if order.status not in active_statuses:
+                if order.status not in _ACTIVE_ORDER_STATUSES:
                     continue
                 orders_data.append({
                     "side": order.side.value,
@@ -1029,12 +1239,21 @@ class PublicTerminal(App):
         self.call_from_thread(self.load_rebalancer_status)
 
     def action_rebalance_settings(self) -> None:
+        from rebalance import SUPPORTED_INDEXES, _ETF_TO_INDEX, _INDEX_SP500, _DEFAULT_ALLOCS
         cfg = _load_rebalance_config()
+        # Migrate legacy etf_ticker to index if needed
+        current_index = cfg.get("index") or cfg.get("etf_ticker", "SP500")
+        if current_index not in SUPPORTED_INDEXES:
+            current_index = _ETF_TO_INDEX.get(current_index, _INDEX_SP500)
+        default_allocs = {k: float(v) for k, v in _DEFAULT_ALLOCS.items()}
+        current_allocs = cfg.get("allocations", default_allocs)
         self.push_screen(
             RebalanceConfigModal(
-                cfg.get("etf_ticker", "SPY"),
-                cfg.get("top_n", 100),
+                current_index,
+                cfg.get("top_n", 500),
                 cfg.get("margin_usage_pct", 0.5),
+                cfg.get("excluded_tickers", []),
+                current_allocs,
             ),
             self._handle_rebalance_settings,
         )
@@ -1043,10 +1262,26 @@ class PublicTerminal(App):
         if result is None:
             return
         try:
-            _save_rebalance_config(result["etf_ticker"], result["top_n"], result["margin_usage_pct"])
+            from rebalance import SUPPORTED_INDEXES
+            _save_rebalance_config(
+                result["index"], result["top_n"],
+                result["margin_usage_pct"], result["excluded_tickers"],
+                result["allocations"],
+            )
             pct = int(result["margin_usage_pct"] * 100)
+            excl = result["excluded_tickers"]
+            excl_str = f"  excl {len(excl)}" if excl else ""
+            index_label = SUPPORTED_INDEXES.get(result["index"], result["index"])
+            a = result["allocations"]
+            alloc_summary = (
+                f"stk {round(a['stocks']*100)}%  "
+                f"btc {round(a['btc']*100)}%  "
+                f"eth {round(a['eth']*100)}%  "
+                f"gold {round(a['gold']*100)}%  "
+                f"cash {round(a['cash']*100)}%"
+            )
             self.query_one(StatusBar).set_status(
-                f"  Rebalance config saved: {result['etf_ticker']} top-{result['top_n']}  margin {pct}%" + _HINT, "green"
+                f"  Saved: {index_label} top-{result['top_n']}  margin {pct}%{excl_str}  |  {alloc_summary}" + _HINT, "green"
             )
             self.load_rebalancer_status()
         except OSError as exc:

@@ -1,22 +1,43 @@
 # Public Terminal
 
-A btop/htop-style TUI trading terminal for Public.com, with S&P 500 direct indexing and automated daily portfolio rebalancing.
+A btop/htop-style trading TUI for [Public.com](https://public.com), with direct index investing and automated daily portfolio rebalancing.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PUBLIC TERMINAL                                          12:00:00  04-16-26 │
+│  Total $17,055  BP $1.51  Options BP $0.00  Crypto BP $0.00                 │
+│  REBALANCER ● ACTIVE  ENABLED  SPY top-100  margin 50%  | Last: ...         │
+│  [Portfolio chart]                                                           │
+│  ┌─ PORTFOLIO ──────────────────┐  ┌─ OPEN ORDERS ──────────────────────┐  │
+│  │ Symbol  Value   Qty   Chg%   │  │ ID      Side  Symbol  Amount  Status│  │
+│  │ NVDA    1459   12.3   -1.2%  │  │ ...                                  │  │
+│  │ ...                          │  │                                      │  │
+│  └──────────────────────────────┘  └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Features
 
-- Live portfolio: holdings, buying power, open orders
-- Market buy/sell orders for equities, ETFs, crypto, bonds
-- S&P 500 direct indexing — top 250 by market cap, rebalanced daily
-- Target allocation: 65% stocks · 15% BTC · 5% ETH · 10% GLDM · 5% SGOV
-- Systemd timer fires Mon–Fri at 12:00 ET; manage it from inside the TUI
+- **Live portfolio** — holdings, values, quantities, open orders
+- **Manual orders** — market buy and sell for equities, ETFs, and crypto
+- **Portfolio chart** — scrollable price history across all your holdings
+- **Direct index investing** — top N stocks from SPY/QQQ/DIA, market-cap weighted, rebalanced daily
+- **Margin support** — optionally deploy a configurable percentage of your margin capacity as additional buying power
+- **Configurable exclusions** — skip specific tickers from rebalancing entirely
+- **PDT protection** — day-trade ledger prevents selling positions opened the same day
+- **Systemd timer** — fires Mon–Fri at 12:00 ET; fully manageable from inside the TUI
+
+---
 
 ## Setup
 
 ### 1. Prerequisites
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- systemd user instance enabled (`loginctl enable-linger $USER`)
+- [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- A [Public.com](https://public.com) brokerage account with API access
 
 ### 2. Install dependencies
 
@@ -33,90 +54,197 @@ PUBLIC_ACCESS_TOKEN=<your API secret key from public.com>
 PUBLIC_ACCOUNT_NUMBER=<your brokerage account number, e.g. 5OP95222>
 ```
 
-Both values come from your Public.com account settings. The access token is an API secret key — the SDK exchanges it for short-lived bearer tokens automatically.
+Both values are in your Public.com account settings. The SDK exchanges the access token for short-lived bearer tokens automatically.
 
-### 4. Run the TUI
+### 4. Launch
 
 ```bash
 uv run main.py
 ```
 
-#### Key bindings
+---
+
+## Interface
+
+### Layout
+
+```
+Header (clock)
+Balance Bar       — total equity, buying power (cash / options / crypto)
+Rebalancer Bar    — timer status, active config, key hint strip
+Portfolio Chart   — scrollable price history
+┌─ PORTFOLIO ──────┐  ┌─ OPEN ORDERS ──────┐
+│ holdings table   │  │ pending orders      │
+└──────────────────┘  └────────────────────┘
+Footer (key bindings)
+```
+
+### Key bindings
 
 | Key | Action |
-| --- | ------ |
-| `r` | Refresh portfolio |
-| `b` | Market buy |
-| `s` | Market sell |
-| `c` | Cancel selected order |
-| `t` | Start / stop rebalancer timer |
-| `e` | Enable / disable rebalancer (persists across reboots) |
+|-----|--------|
+| `r` | Refresh portfolio, orders, and rebalancer status |
+| `b` | Place a market **buy** order |
+| `s` | Place a market **sell** order |
+| `c` | Cancel the selected open order |
+| `h` | View order history |
+| `[` | Scroll portfolio chart left (earlier) |
+| `]` | Scroll portfolio chart right (later) |
+| `t` | **Start / stop** the rebalancer systemd timer (this session) |
+| `e` | **Enable / disable** the rebalancer timer (survives reboots) |
+| `x` | **Skip the next** scheduled rebalance run |
+| `R` | **Run the rebalancer now** (confirmation required) |
+| `S` | Open **rebalance settings** modal |
 | `q` | Quit |
 
-## Systemd Setup (Daily Rebalancer)
+### Placing orders (`b` / `s`)
 
-The rebalancer runs as a user-level systemd service. No root access required.
+A modal prompts for:
+- **Symbol** — e.g. `AAPL`, `BTC`, `GLDM`
+- **Instrument type** — Equity or Crypto
+- **Quantity** — shares or coin units (fractional supported)
 
-### 1. Install the unit files
+All orders are market orders, day-only.
+
+### Cancelling orders (`c`)
+
+Select a row in the Open Orders table, then press `c`. A confirmation modal shows the order details before cancellation.
+
+### Portfolio chart (`[` / `]`)
+
+Shows a price history chart for the positions in your portfolio, loaded in a single batched fetch. Use `[` and `]` to scroll the time window.
+
+---
+
+## Rebalancer
+
+### Target allocation
+
+| Asset | Allocation | Notes |
+|-------|-----------|-------|
+| Stocks | 65% | Top N from configured index ETF, market-cap weighted |
+| BTC | 15% | Bitcoin |
+| ETH | 5% | Ethereum |
+| GLDM | 10% | Gold ETF |
+| SGOV | 5% | 0–3 month T-bills (short-term yield) |
+
+### How it works
+
+Each run:
+
+1. Scrapes the current constituent list for the configured index from Wikipedia
+2. Fetches market caps via yfinance (20 parallel workers; results cached up to 20 hours)
+3. Selects the top N by market cap, filters out any excluded tickers, and computes within-slice weights
+4. Fetches the current portfolio from Public.com
+5. Computes dollar deltas for all buckets against the **investment base** (see Margin below)
+6. Drift threshold: `max(0.5% of target, $1)` — positions within tolerance are left alone
+7. Places SELL orders first, waits for them to clear, then places BUY orders
+8. BUY orders are capped to the effective buying power budget
+9. Full liquidations (stocks that dropped out of the index) use share-quantity orders to avoid broker rejection
+10. Logs everything to `cache/rebalance.log`
+
+### Margin investing
+
+When margin investing is enabled on your Public.com account, you can configure what percentage of your available margin capacity the rebalancer uses as **additional** buying power on top of cash:
+
+```
+investment_base    = total_equity + (margin_usage_pct × margin_capacity)
+effective_bp       = cash_buying_power + (margin_usage_pct × margin_capacity)
+```
+
+All asset targets are computed against `investment_base`, so margin funds proportionally larger positions across every bucket — not just stocks. Set `margin_usage_pct = 0.0` to use cash only.
+
+### PDT (Pattern Day Trading) protection
+
+A daily buy ledger (`cache/today_buys.json`) records every equity symbol purchased in any run today. Subsequent runs skip selling those symbols to avoid same-day buy+sell round-trips. The ledger resets automatically at midnight.
+
+If the broker signals a PDT restriction mid-run, the rebalancer aborts remaining orders cleanly and logs the error.
+
+### Rebalance settings (`S`)
+
+The settings modal lets you configure without editing any files:
+
+| Field | Description |
+|-------|-------------|
+| **Index ETF ticker** | Determines which constituent list to track (see table below) |
+| **Top N stocks** | How many of the top constituents to hold (by market cap). Default: 500 (full index) |
+| **Margin usage** | `0.0` = cash only · `0.5` = 50% of margin capacity · `1.0` = full margin |
+| **Excluded tickers** | Comma-separated symbols to skip entirely (no buys, no sells) |
+
+Supported ETFs (constituent lists are sourced from Wikipedia):
+
+| ETF(s) | Index |
+|--------|-------|
+| `SPY`, `VOO`, `IVV`, `SPLG`, `CSPX` | S&P 500 |
+| `QQQ`, `QQQM`, `ONEQ` | NASDAQ-100 |
+| `DIA` | Dow Jones Industrial Average |
+
+Any other ticker will be rejected with an error — arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
+
+### Skipping a run (`x`)
+
+Pressing `x` creates a `cache/skip_next_rebalance` sentinel file. The next scheduled (or manual) run detects it, removes it, and exits immediately. Useful before travel or when you want to pause one cycle.
+
+---
+
+## Systemd Timer (Automated Daily Rebalance)
+
+The rebalancer runs as a user-level systemd service — no root access required.
+
+### Install
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp systemd/public-terminal-rebalance.service ~/.config/systemd/user/
 cp systemd/public-terminal-rebalance.timer    ~/.config/systemd/user/
 systemctl --user daemon-reload
-```
-
-### 2. Enable and start the timer
-
-```bash
 systemctl --user enable --now public-terminal-rebalance.timer
 ```
 
-The timer fires Mon–Fri at **12:00 ET** (handles DST automatically). If the system was offline at noon, `Persistent=true` causes it to run immediately on next boot.
+The timer fires Mon–Fri at **12:00 ET** (DST-aware). `Persistent=true` means it catches up immediately after a missed run (e.g. system was off at noon).
 
-### 3. Check status
+### Manage from the TUI
+
+| Key | Effect |
+|-----|--------|
+| `t` | Start or stop the timer for this session |
+| `e` | Enable or disable the timer permanently (survives reboots) |
+| `x` | Skip the next run |
+| `R` | Trigger an immediate run |
+
+### Manage from the shell
 
 ```bash
-# Is the timer running?
+# Status
 systemctl --user status public-terminal-rebalance.timer
-
-# When does it fire next?
 systemctl --user list-timers public-terminal-rebalance.timer
 
-# View rebalancer logs
+# Live logs
 journalctl --user -u public-terminal-rebalance.service -f
-
-# Or read the log file directly
 tail -f cache/rebalance.log
-```
 
-### 4. Stop / disable
-
-```bash
-# Stop for this session only
+# Stop for this session
 systemctl --user stop public-terminal-rebalance.timer
 
-# Stop permanently (survives reboots)
+# Disable permanently
 systemctl --user disable --now public-terminal-rebalance.timer
 ```
 
-You can also use **`t`** and **`e`** inside the TUI to start/stop and enable/disable without leaving the terminal.
-
-### 5. Run a manual rebalance
+### Run manually
 
 ```bash
 uv run rebalance.py
 ```
 
-Logs are written to `cache/rebalance.log`. Market cap data is cached for up to 20 hours in `cache/market_caps.json` so repeated same-day runs are fast.
+---
 
-## Rebalancing Logic
+## Configuration files
 
-Each noon run:
-
-1. Scrapes the current S&P 500 constituent list from Wikipedia.
-2. Fetches market caps via yfinance (parallel, 20 workers). Results cached same-day.
-3. Selects the top 250 by market cap and computes within-slice weights.
-4. Fetches current portfolio from Public.com.
-5. Computes dollar deltas for all four buckets. Drift threshold: max(0.5% of target, $5).
-6. Places SELL orders first (to free cash), then BUY orders. BTC is converted from dollar delta to coin quantity using the live Public.com quote.
+| File | Purpose |
+|------|---------|
+| `.env` | API credentials (access token, account number) |
+| `rebalance_config.json` | ETF, top N, margin %, excluded tickers |
+| `cache/rebalance.log` | Full rebalancer run history |
+| `cache/market_caps.json` | Same-day market cap cache (auto-refreshes) |
+| `cache/today_buys.json` | PDT protection ledger (resets daily) |
+| `cache/skip_next_rebalance` | Sentinel file — presence skips one run |

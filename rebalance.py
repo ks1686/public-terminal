@@ -756,7 +756,7 @@ def get_portfolio_snapshot(
     Fetch current portfolio from Public.com.
 
     Returns:
-        total_equity           — sum of all asset values (cash + investments)
+        total_equity           — sum of all non-cash asset values (investments only; cash excluded)
         buying_power           — total available buying power (cash + margin if enabled)
         cash_only_buying_power — buying power from settled cash only (no margin)
         equity_pos             — {symbol: current_value} for EQUITY positions
@@ -765,7 +765,12 @@ def get_portfolio_snapshot(
         crypto_qty             — {symbol: coin_quantity} for CRYPTO positions
     """
     portfolio = client.get_portfolio()
-    total_equity = sum(e.value for e in portfolio.equity)
+    # Exclude CASH-type entries so total_equity = invested-asset value only.
+    # Cash is captured via cash_only_buying_power, and the two are combined
+    # into portfolio_nav in rebalance() to compute the true NAV.
+    total_equity = sum(
+        e.value for e in portfolio.equity if e.type.value != "CASH"
+    )
     buying_power_obj = getattr(portfolio, "buying_power", None)
     raw_buying_power = getattr(buying_power_obj, "buying_power", None)
     raw_cash_only_buying_power = getattr(
@@ -1267,18 +1272,24 @@ def rebalance() -> None:
             equity_qty,
             crypto_qty,
         ) = get_portfolio_snapshot(client)
-        # Total margin capacity (amount borrowable against equity for a Reg-T 2x
-        # margin account) ≈ total_equity. The API's (buying_power - cash_only_bp)
-        # gives only the REMAINING unused headroom, which shrinks as positions are
-        # deployed — not what users mean by "% of my margin". cap_buy_orders_to_buying_power
-        # acts as the downstream safety net against Public's real-time limit.
+        # margin_capacity ≈ total_equity (Reg-T: can borrow up to your equity value).
+        # (buying_power - cash_only_bp) is the REMAINING margin headroom; when it
+        # shrinks below margin_capacity, the difference is the outstanding margin loan.
+        # cap_buy_orders_to_buying_power is still the downstream safety net.
         margin_capacity = max(Decimal("0"), total_equity) if buying_power > cash_only_bp else Decimal("0")
-        margin_to_deploy = margin_usage_pct * margin_capacity
-        investment_base = total_equity + margin_to_deploy
+        available_headroom = max(Decimal("0"), buying_power - cash_only_bp)
+        # Estimate margin loan from consumed headroom; detects both cash withdrawals
+        # (cash_only_bp drops) and direct margin loans (headroom drops).
+        margin_loan_estimate = max(Decimal("0"), margin_capacity - available_headroom)
+        # True portfolio NAV = non-cash investments + available cash - outstanding loan
+        portfolio_nav = total_equity + cash_only_bp - margin_loan_estimate
+        margin_to_deploy = margin_usage_pct * portfolio_nav
+        investment_base = portfolio_nav + margin_to_deploy
         effective_buying_power = cash_only_bp + margin_to_deploy
         log.info(
-            "  Total equity: $%.2f  |  margin to deploy: $%.2f  |  investment base: $%.2f  |  effective BP: $%.2f  |  equity positions: %d",
-            total_equity,
+            "  Portfolio NAV: $%.2f  |  margin loan est.: $%.2f  |  margin to deploy: $%.2f  |  investment base: $%.2f  |  equity positions: %d",
+            portfolio_nav,
+            margin_loan_estimate,
             margin_to_deploy,
             investment_base,
             effective_buying_power,
@@ -1513,13 +1524,16 @@ def rebalance() -> None:
                         if post_bp > post_cash_bp
                         else Decimal("0")
                     )
+                    post_available_headroom = max(Decimal("0"), post_bp - post_cash_bp)
+                    post_loan_estimate = max(Decimal("0"), post_margin_cap - post_available_headroom)
+                    post_portfolio_nav = post_equity + post_cash_bp - post_loan_estimate
                     post_sell_effective_bp = (
-                        post_cash_bp + margin_usage_pct * post_margin_cap
+                        post_cash_bp + margin_usage_pct * post_portfolio_nav
                     )
                     log.info(
-                        "  Post-sell BP — cash: $%.2f  margin capacity: $%.2f  effective: $%.2f",
-                        post_cash_bp,
-                        post_margin_cap,
+                        "  Post-sell — NAV: $%.2f  margin loan est.: $%.2f  effective BP: $%.2f",
+                        post_portfolio_nav,
+                        post_loan_estimate,
                         post_sell_effective_bp,
                     )
                 except Exception as exc:

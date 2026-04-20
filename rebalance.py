@@ -830,25 +830,27 @@ def estimate_margin_state(
     Return (portfolio_nav, current_margin_loan, allowed_margin_loan,
     investment_base, effective_buying_power).
 
-    The configured margin percentage is a target cap on total margin debt.
-    Existing margin debt, including withdrawal loans, consumes that cap before
-    any new buy orders are allowed.
+    The configured margin percentage is applied to margin buying-power capacity:
+    current margin debt plus currently available margin buying power. Existing
+    margin debt, including withdrawal loans, consumes that allowance before any
+    new buy orders are allowed.
     """
-    margin_available = buying_power > cash_only_buying_power or cash_balance < Decimal("0")
+    margin_buying_power = max(Decimal("0"), buying_power - cash_only_buying_power)
+    margin_available = margin_buying_power > Decimal("0") or cash_balance < Decimal("0")
     if cash_balance < Decimal("0"):
         current_margin_loan = -cash_balance
     elif margin_available:
-        available_headroom = max(Decimal("0"), buying_power - cash_only_buying_power)
         current_margin_loan = max(
             Decimal("0"),
-            total_equity + cash_balance - available_headroom,
+            total_equity + cash_balance - margin_buying_power,
         )
     else:
         current_margin_loan = Decimal("0")
 
     portfolio_nav = max(Decimal("0"), total_equity + cash_balance)
+    margin_capacity = current_margin_loan + margin_buying_power
     allowed_margin_loan = (
-        margin_usage_pct * portfolio_nav if margin_available else Decimal("0")
+        margin_usage_pct * margin_capacity if margin_available else Decimal("0")
     )
     investment_base = portfolio_nav + allowed_margin_loan
     effective_buying_power = max(

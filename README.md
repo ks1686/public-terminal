@@ -173,12 +173,13 @@ Each run:
 When margin investing is enabled on your Public.com account, you can configure what percentage of your available margin capacity the rebalancer uses as **additional** buying power on top of cash:
 
 ```text
-allowed_margin     = margin_usage_pct × portfolio_nav
+margin_capacity    = current_margin_loan + current_margin_buying_power
+allowed_margin     = margin_usage_pct × margin_capacity
 investment_base    = portfolio_nav + allowed_margin
 effective_bp       = cash_buying_power + max(0, allowed_margin - current_margin_loan)
 ```
 
-All asset targets are computed against `investment_base`, so margin funds proportionally larger positions across every bucket — not just stocks. Existing margin debt, including margin withdrawal loans, consumes the allowed margin budget before any new buy orders are placed. Set `margin_usage_pct = 0.0` to use cash only.
+All asset targets are computed against `investment_base`, so margin funds proportionally larger positions across every bucket — not just stocks. Existing margin debt, including margin withdrawal loans, consumes the allowed margin buying-power budget before any new buy orders are placed. Set `margin_usage_pct = 0.0` to use cash only.
 
 The TUI checks Public.com's reported buying power before allowing margin configuration. If total buying power does not exceed cash-only buying power, the margin input is disabled and saved as `0.0`.
 

@@ -216,21 +216,23 @@ class PublicTerminal(App):
              if getattr(e, "type", None) is not None and e.type.value == "CASH"),
             Decimal("0"),
         )
-        margin_enabled = buying_power > cash_only_buying_power or cash_balance < 0
+        margin_buying_power = max(Decimal("0"), buying_power - cash_only_buying_power)
+        margin_enabled = margin_buying_power > 0 or cash_balance < 0
         total_equity_ex_cash = sum(
             (e.value for e in getattr(portfolio, "equity", []) or []
              if getattr(e, "type", None) is not None and e.type.value != "CASH"),
             Decimal("0"),
         )
         if margin_enabled:
-            available_headroom = max(Decimal("0"), buying_power - cash_only_buying_power)
             margin_loan = (
                 -cash_balance
                 if cash_balance < 0
-                else max(Decimal("0"), total_equity_ex_cash + cash_balance - available_headroom)
+                else max(
+                    Decimal("0"),
+                    total_equity_ex_cash + cash_balance - margin_buying_power,
+                )
             )
-            portfolio_nav = total_equity_ex_cash + cash_balance
-            margin_capacity = max(Decimal("0"), portfolio_nav)
+            margin_capacity = max(Decimal("0"), margin_loan + margin_buying_power)
         else:
             margin_capacity = Decimal("0")
         return margin_enabled, margin_capacity

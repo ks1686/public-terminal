@@ -38,6 +38,7 @@ from config import (
     _remove_service_files,
     _save_rebalance_config,
 )
+from client import validate_order_instrument
 from modals import (
     CancelConfirmModal,
     HistoryModal,
@@ -553,6 +554,7 @@ class PublicTerminal(App):
         status = self.query_one(StatusBar)
         try:
             client = self._get_client()
+            validate_order_instrument(client, symbol, instrument_type, side)
             request = OrderRequest(
                 order_id=str(uuid.uuid4()),
                 instrument=OrderInstrument(symbol=symbol, type=instrument_type),

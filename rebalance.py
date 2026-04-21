@@ -25,7 +25,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 import pandas as pd
 import yfinance as yf
@@ -39,7 +39,11 @@ from public_api_sdk import (
     TimeInForce,
 )
 
-from client import get_client
+from client import (
+    get_client,
+    get_tradable_instrument_symbols,
+    validate_order_instrument,
+)
 from config import (
     _ACTIVE_ORDER_STATUSES,
     BROKER_TO_YF_SYMBOLS,
@@ -123,6 +127,7 @@ log = logging.getLogger(__name__)
 _INDEX_SP500 = "SP500"
 _INDEX_NASDAQ100 = "NASDAQ100"
 _INDEX_DJIA = "DJIA"
+_INDEX_VT = "FTSE_GLOBAL_ALL_CAP"
 
 # Legacy ETF ticker → index name (for migrating old configs)
 _ETF_TO_INDEX: dict[str, str] = {
@@ -135,6 +140,7 @@ _ETF_TO_INDEX: dict[str, str] = {
     "QQQM": _INDEX_NASDAQ100,
     "ONEQ": _INDEX_NASDAQ100,
     "DIA": _INDEX_DJIA,
+    "VT": _INDEX_VT,
 }
 
 
@@ -142,6 +148,7 @@ SUPPORTED_INDEXES: dict[str, str] = {
     _INDEX_SP500: "S&P 500",
     _INDEX_NASDAQ100: "NASDAQ-100",
     _INDEX_DJIA: "Dow Jones (DJIA)",
+    _INDEX_VT: "Global equities (ACWI proxy)",
 }
 
 
@@ -158,7 +165,7 @@ def load_rebalance_config(
 ) -> tuple[str, int, Decimal, frozenset[str]]:
     """Return (index, top_n, margin_usage_pct, excluded_tickers) from rebalance_config.json.
 
-    index is one of: SP500, NASDAQ100, DJIA.
+    index is one of: SP500, NASDAQ100, DJIA, FTSE_GLOBAL_ALL_CAP.
     Old configs using etf_ticker (SPY, QQQ, DIA, etc.) are migrated automatically.
 
     margin_usage_pct: 0.0 = cash only, 0.5 = 50% of margin capacity, 1.0 = full margin.
@@ -440,6 +447,31 @@ def _fetch_djia_tickers_wikipedia() -> list[str]:
     raise RuntimeError("Could not find DJIA constituent table on Wikipedia")
 
 
+def _fetch_vt_tickers_official() -> list[str]:
+    """Fetch a global equity proxy from iShares MSCI ACWI daily holdings CSV.
+
+    iShares CSV: 9 metadata rows, then a header row, then data.
+    We keep only Equity rows whose ticker is purely alphabetic (A–Z, 1–5 chars).
+    Non-US holdings use numeric or exchange-qualified tickers ("2330", "005930"),
+    which are dropped by the alpha filter.  Foreign companies whose primary-listing
+    ticker matches their US ADR ticker (ASML, AZN, SHEL, SHOP, SAP, RY, …) pass
+    through and resolve to their US listing when yfinance fetches market caps;
+    purely-foreign tickers that have no matching US listing fail silently at the
+    market-cap stage and are naturally excluded from top-N selection.
+    """
+    url = (
+        "https://www.ishares.com/us/products/239600/ISHARES-MSCI-ACWI-ETF"
+        "/1467271812596.ajax?fileType=csv&fileName=ACWI_holdings&dataType=fund"
+    )
+    content = _fetch_bytes(url).decode("utf-8")
+    df = pd.read_csv(io.StringIO(content), skiprows=9)
+    if "Asset Class" in df.columns:
+        df = df[df["Asset Class"].str.contains("Equity", na=False)]
+    raw = _clean_tickers(df["Ticker"].tolist())
+    # Drop numeric/exchange-qualified foreign tickers; keep US-style alphabetic ones
+    return [t for t in raw if t.isalpha() and len(t) <= 5]
+
+
 # --- public fetch functions ---
 
 
@@ -482,14 +514,23 @@ def _fetch_djia_tickers() -> list[str]:
         return tickers
 
 
+def _fetch_vt_tickers() -> list[str]:
+    log.info("Fetching global equity proxy constituents (iShares ACWI)…")
+    tickers = _fetch_vt_tickers_official()
+    log.info("  → %d US-listed constituents", len(tickers))
+    return tickers
+
+
 def fetch_constituents(index: str) -> list[str]:
-    """Return the constituent list for the given index identifier (SP500 / NASDAQ100 / DJIA)."""
+    """Return the constituent list for the given index identifier."""
     if index == _INDEX_NASDAQ100:
         return _fetch_nasdaq100_tickers()
     if index == _INDEX_DJIA:
         return _fetch_djia_tickers()
     if index == _INDEX_SP500:
         return _fetch_sp500_tickers()
+    if index == _INDEX_VT:
+        return _fetch_vt_tickers()
     raise ValueError(
         f"Unsupported index '{index}'. Supported values: {', '.join(SUPPORTED_INDEXES)}"
     )
@@ -679,6 +720,92 @@ def top_n_by_market_cap(
         market_caps[top[-1]] / 1e9,
     )
     return top
+
+
+def rank_by_market_cap(
+    tickers: list[str],
+    market_caps: dict[str, float],
+) -> list[str]:
+    """Return all tickers with usable market caps, ranked largest first."""
+    return sorted(
+        [t for t in tickers if t in market_caps],
+        key=lambda t: market_caps[t],
+        reverse=True,
+    )
+
+
+def select_public_tradable_stocks(
+    client,
+    tickers: list[str],
+    market_caps: dict[str, float],
+    n: int,
+    excluded_tickers: frozenset[str],
+) -> list[str]:
+    """Select top-N stocks that exist on Public and are buyable before planning orders."""
+    ranked = rank_by_market_cap(tickers, market_caps)
+    if not ranked:
+        log.error(
+            "No usable market caps found for %d constituent(s); cannot select top %d.",
+            len(tickers),
+            n,
+        )
+        return []
+
+    selected: list[str] = []
+    excluded_seen: list[str] = []
+    untradable_seen: list[str] = []
+    public_buyable_symbols = get_tradable_instrument_symbols(
+        client, InstrumentType.EQUITY, OrderSide.BUY
+    )
+    log.info(
+        "Loaded %d Public-buyable equity symbol(s) for basket validation.",
+        len(public_buyable_symbols),
+    )
+    for symbol in ranked:
+        if symbol not in public_buyable_symbols:
+            untradable_seen.append(symbol)
+            log.info("  Skipping %s — not buyable or missing on Public.", symbol)
+            continue
+
+        if symbol in excluded_tickers:
+            excluded_seen.append(symbol)
+            log.info("  Skipping %s — excluded by config after Public validation.", symbol)
+            continue
+
+        selected.append(symbol)
+        if len(selected) >= n:
+            break
+
+    if selected:
+        log.info(
+            "Top %d Public-tradable stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
+            len(selected),
+            selected[0],
+            market_caps[selected[0]] / 1e12,
+            selected[-1],
+            market_caps[selected[-1]] / 1e9,
+        )
+    if excluded_seen:
+        log.info(
+            "  Excluded after Public validation (%d): %s",
+            len(excluded_seen),
+            ", ".join(excluded_seen[:10]) + ("…" if len(excluded_seen) > 10 else ""),
+        )
+    if untradable_seen:
+        log.warning(
+            "  Skipped %d non-buyable/Public-missing constituent(s): %s",
+            len(untradable_seen),
+            ", ".join(untradable_seen[:10])
+            + ("…" if len(untradable_seen) > 10 else ""),
+        )
+    if len(selected) < n:
+        log.warning(
+            "  Only %d Public-buyable replacement stock(s) available; holding %d instead of %d positions.",
+            len(selected),
+            len(selected),
+            n,
+        )
+    return selected
 
 
 def compute_stock_weights(
@@ -906,13 +1033,17 @@ def _make_order(
             raise ValueError(
                 f"CRYPTO order below minimum (${dollar_amount} < ${MIN_CRYPTO_ORDER_DOLLARS})"
             )
-        quantity = (dollar_amount / crypto_price).quantize(Decimal("0.00001"))
+        quantity = (dollar_amount / crypto_price).quantize(
+            Decimal("0.00001"), rounding=ROUND_DOWN
+        )
         if quantity <= 0:
             raise ValueError(
                 f"CRYPTO order quantity rounds to zero ({symbol}: ${dollar_amount} at ${crypto_price}/coin)"
             )
         if side == OrderSide.SELL and crypto_held_quantity is not None:
-            quantity = min(quantity, crypto_held_quantity).quantize(Decimal("0.00001"))
+            quantity = min(quantity, crypto_held_quantity).quantize(
+                Decimal("0.00001"), rounding=ROUND_DOWN
+            )
             if quantity <= 0:
                 raise ValueError(
                     f"CRYPTO SELL quantity rounds to zero after capping to held balance ({symbol})"
@@ -925,7 +1056,7 @@ def _make_order(
                 f"Equity quantity is zero for full-liquidation sell ({symbol})"
             )
         return OrderRequest(**base, quantity=equity_quantity)
-    amount = dollar_amount.quantize(Decimal("0.01"))
+    amount = dollar_amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
     if amount <= 0:
         raise ValueError(
             f"Equity order amount rounds to zero ({symbol}: ${dollar_amount})"
@@ -1022,6 +1153,7 @@ def place_orders(
     submitted_orders: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
     for symbol, inst_type, side, dollar_amount in orders:
         try:
+            validate_order_instrument(client, symbol, inst_type, side)
             price = (crypto_prices or {}).get(symbol)
             eq_qty = (
                 (liquidation_quantities or {}).get(symbol)
@@ -1100,6 +1232,62 @@ def place_orders(
         time.sleep(0.1)
     log.info("Orders placed: %d  |  failed: %d", success, fail)
     return submitted_order_ids, submitted_orders
+
+
+def filter_orders_by_public_tradability(
+    client,
+    orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
+) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
+    """Remove orders Public reports as unavailable before any submission attempt."""
+    valid_orders: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+    skipped: list[str] = []
+    for symbol, inst_type, side, dollar_amount in orders:
+        try:
+            validate_order_instrument(client, symbol, inst_type, side)
+        except ValueError as exc:
+            skipped.append(symbol)
+            log.warning(
+                "Skipping %s %s before order submission — Public validation failed: %s",
+                side.value,
+                symbol,
+                exc,
+            )
+            continue
+        valid_orders.append((symbol, inst_type, side, dollar_amount))
+
+    if skipped:
+        log.warning(
+            "Removed %d order(s) before submission after Public validation: %s",
+            len(skipped),
+            ", ".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""),
+        )
+    return valid_orders
+
+
+def log_dry_run_orders(
+    orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
+    *,
+    label: str,
+    max_rows: int = 25,
+) -> None:
+    """Log planned orders without submitting anything."""
+    total = sum(order[3] for order in orders)
+    log.info(
+        "DRY RUN — would submit %d %s order(s), total notional $%.2f.",
+        len(orders),
+        label,
+        total,
+    )
+    for symbol, inst_type, side, amount in orders[:max_rows]:
+        log.info(
+            "  DRY RUN  %-6s %-6s %-6s $%9.2f",
+            side.value,
+            symbol,
+            inst_type.value,
+            amount,
+        )
+    if len(orders) > max_rows:
+        log.info("  DRY RUN  … %d additional %s order(s)", len(orders) - max_rows, label)
 
 
 def wait_for_orders_to_clear(
@@ -1246,9 +1434,15 @@ def compute_unallocated_buy_delta(
 # ---------------------------------------------------------------------------
 
 
-def rebalance() -> None:
+def rebalance(dry_run: bool = False) -> None:
     log.info("=" * 64)
-    log.info("PORTFOLIO REBALANCE  —  %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    mode = "DRY-RUN PORTFOLIO REBALANCE" if dry_run else "PORTFOLIO REBALANCE"
+    log.info("%s  —  %s", mode, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if dry_run:
+        log.info(
+            "DRY RUN ENABLED — no orders will be placed, no orders will be cancelled, "
+            "and the day-trade ledger will not be modified."
+        )
     _cfg = _load_config_json()
     index, top_n, margin_usage_pct, excluded_tickers = load_rebalance_config(_cfg)
     alloc = load_allocation_config(_cfg)
@@ -1280,7 +1474,11 @@ def rebalance() -> None:
         )
     log.info("=" * 64)
 
-    if SKIP_FILE.exists():
+    if SKIP_FILE.exists() and dry_run:
+        log.info(
+            "DRY RUN — skip sentinel is present but was not removed; continuing to show plan."
+        )
+    elif SKIP_FILE.exists():
         SKIP_FILE.unlink()
         log.info(
             "SKIPPED — skip sentinel was set. Removed sentinel; next run will proceed normally."
@@ -1289,32 +1487,35 @@ def rebalance() -> None:
 
     constituents = fetch_constituents(index)
     market_caps = fetch_market_caps(constituents, index)
-    _top_stocks_raw = top_n_by_market_cap(constituents, market_caps, top_n)
-    if not _top_stocks_raw:
-        log.error(
-            "REBALANCE ABORTED — no top stocks could be selected from market-cap data."
-        )
-        return
-    top_stocks = [t for t in _top_stocks_raw if t not in excluded_tickers]
-    if excluded_tickers:
-        filtered_out = excluded_tickers & set(_top_stocks_raw)
-        if filtered_out:
-            log.info(
-                "  Excluded from top-%d: %s", top_n, ", ".join(sorted(filtered_out))
-            )
-    if not top_stocks:
-        log.error(
-            "REBALANCE ABORTED — all selected top-%d stocks are excluded by config.",
-            top_n,
-        )
-        return
-    stock_weights = compute_stock_weights(top_stocks, market_caps)
 
-    log.info("Fetching portfolio from Public.com…")
+    log.info("Connecting to Public.com…")
     client = get_client()
     try:
+        log.info("--- Selecting Public-tradable stock basket ---")
+        top_stocks = select_public_tradable_stocks(
+            client, constituents, market_caps, top_n, excluded_tickers
+        )
+        if not top_stocks:
+            log.error(
+                "REBALANCE ABORTED — no Public-buyable top stocks could be selected."
+            )
+            return
+        stock_weights = compute_stock_weights(top_stocks, market_caps)
+
+        log.info("Fetching portfolio from Public.com…")
         initial_portfolio = client.get_portfolio()
-        cancel_open_orders(client, initial_portfolio.orders or [])
+        if dry_run:
+            open_orders = [
+                o
+                for o in (initial_portfolio.orders or [])
+                if o.status in _ACTIVE_ORDER_STATUSES
+            ]
+            log.info(
+                "DRY RUN — would cancel %d open order(s) before a live rebalance; no cancellations sent.",
+                len(open_orders),
+            )
+        else:
+            cancel_open_orders(client, initial_portfolio.orders or [])
 
         # Re-fetch after cancellations so snapshot reflects the clean state
         (
@@ -1418,10 +1619,14 @@ def rebalance() -> None:
             )
 
         crypto_prices: dict[str, Decimal] = {}
+        crypto_allocs = {BTC_SYMBOL: alloc_btc, ETH_SYMBOL: alloc_eth}
         crypto_to_fetch = {
             symbol: BROKER_TO_YF_SYMBOLS.get(symbol, f"{symbol}-USD")
-            for symbol in (BTC_SYMBOL, ETH_SYMBOL)
-            if symbol not in excluded_tickers
+            for symbol, alloc_pct in crypto_allocs.items()
+            if (
+                symbol not in excluded_tickers
+                and (alloc_pct > Decimal("0") or crypto_pos.get(symbol, Decimal("0")) > 0)
+            )
         }
         if crypto_to_fetch:
             pool = ThreadPoolExecutor(max_workers=len(crypto_to_fetch))
@@ -1460,7 +1665,7 @@ def rebalance() -> None:
             log.info("--- Skipping BTC delta — excluded by config. ---")
         else:
             log.info("--- Computing BTC delta ---")
-            btc_price = crypto_prices[BTC_SYMBOL]
+            btc_price = crypto_prices.get(BTC_SYMBOL, Decimal("0"))
             btc_target = (alloc_btc * investment_base).quantize(Decimal("0.01"))
             btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
             log.info(
@@ -1484,7 +1689,7 @@ def rebalance() -> None:
             log.info("--- Skipping ETH delta — excluded by config. ---")
         else:
             log.info("--- Computing ETH delta ---")
-            eth_price = crypto_prices[ETH_SYMBOL]
+            eth_price = crypto_prices.get(ETH_SYMBOL, Decimal("0"))
             eth_target = (alloc_eth * investment_base).quantize(Decimal("0.01"))
             eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
             log.info(
@@ -1544,7 +1749,19 @@ def rebalance() -> None:
                 + ("…" if len(liquidation_quantities) > 10 else ""),
             )
 
+        if dry_run:
+            sells = filter_orders_by_public_tradability(client, sells) if sells else []
+            buys = filter_orders_by_public_tradability(client, buys) if buys else []
+            buys = cap_buy_orders_to_buying_power(buys, effective_buying_power)
+            log.info("--- DRY RUN ORDER PLAN ---")
+            log_dry_run_orders(sells, label="sell")
+            log_dry_run_orders(buys, label="buy")
+            log.info("DRY RUN complete — no order, cancellation, or ledger mutation occurred.")
+            return
+
         try:
+            if sells:
+                sells = filter_orders_by_public_tradability(client, sells)
             if sells:
                 log.info("--- Placing SELL orders (%d) ---", len(sells))
                 sell_order_ids, _ = place_orders(
@@ -1561,6 +1778,8 @@ def rebalance() -> None:
                     )
                     return
 
+            if buys:
+                buys = filter_orders_by_public_tradability(client, buys)
             if buys:
                 post_sell_effective_bp = effective_buying_power
                 try:
@@ -1625,4 +1844,4 @@ def rebalance() -> None:
 
 
 if __name__ == "__main__":
-    rebalance()
+    rebalance(dry_run="--dry-run" in sys.argv)

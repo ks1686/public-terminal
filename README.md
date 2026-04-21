@@ -207,8 +207,9 @@ Supported indexes:
 | `SP500` | S&P 500 |
 | `NASDAQ100` | NASDAQ-100 |
 | `DJIA` | Dow Jones Industrial Average |
+| `FTSE_GLOBAL_ALL_CAP` | Global equities via an iShares ACWI holdings proxy |
 
-Legacy ETF values such as `SPY`, `QQQ`, and `DIA` are migrated automatically. Arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
+Legacy ETF values such as `SPY`, `QQQ`, `DIA`, and `VT` are migrated automatically. Arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
 
 ### Skipping a run (`x`)
 
@@ -262,6 +263,10 @@ public-terminal-rebalance
 
 # source-run equivalent
 uv run rebalance.py
+
+# dry-run: compute and validate the plan, but do not cancel or place orders
+public-terminal-rebalance --dry-run
+uv run rebalance.py --dry-run
 ```
 
 ---

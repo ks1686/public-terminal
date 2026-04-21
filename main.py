@@ -7,7 +7,7 @@ import sys
 def main() -> None:
     if "--rebalance" in sys.argv:
         from rebalance import rebalance
-        rebalance()
+        rebalance(dry_run="--dry-run" in sys.argv)
     elif "--install-service" in sys.argv:
         from config import _install_service_files
         try:

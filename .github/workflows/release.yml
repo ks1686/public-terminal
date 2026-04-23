@@ -30,7 +30,7 @@ jobs:
 
       - name: Compile check
         run: |
-          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py
+          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py
 
       - name: Import smoke check
         run: |
@@ -38,7 +38,7 @@ jobs:
 
       - name: Unit tests
         run: |
-          uv run python -m unittest -v test_audit.py
+          uv run python -m unittest discover -v -p "test_*.py"
 
   build-binaries:
     needs: quality

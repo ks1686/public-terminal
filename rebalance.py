@@ -92,7 +92,7 @@ MARKET_CAP_FETCH_TIMEOUT_SECONDS = (
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
 CRYPTO_PRICE_FETCH_TIMEOUT_SECONDS = YFINANCE_DOWNLOAD_TIMEOUT_SECONDS * 2
 
-MIN_ORDER_DOLLARS = Decimal("1.00")  # ignore equity orders smaller than $1
+MIN_ORDER_DOLLARS = Decimal("5.00")  # Public.com API enforces a $5 minimum per order
 MIN_CRYPTO_ORDER_DOLLARS = Decimal("1.00")  # minimum notional for any crypto order
 REBALANCE_THRESHOLD_PCT = Decimal("0.005")  # only act if drift > 0.5% of target
 BUYING_POWER_BUFFER = Decimal(
@@ -740,6 +740,7 @@ def select_public_tradable_stocks(
     market_caps: dict[str, float],
     n: int,
     excluded_tickers: frozenset[str],
+    public_buyable_symbols: set[str] | None = None,
 ) -> list[str]:
     """Select top-N stocks that exist on Public and are buyable before planning orders."""
     ranked = rank_by_market_cap(tickers, market_caps)
@@ -754,13 +755,14 @@ def select_public_tradable_stocks(
     selected: list[str] = []
     excluded_seen: list[str] = []
     untradable_seen: list[str] = []
-    public_buyable_symbols = get_tradable_instrument_symbols(
-        client, InstrumentType.EQUITY, OrderSide.BUY
-    )
-    log.info(
-        "Loaded %d Public-buyable equity symbol(s) for basket validation.",
-        len(public_buyable_symbols),
-    )
+    if public_buyable_symbols is None:
+        public_buyable_symbols = get_tradable_instrument_symbols(
+            client, InstrumentType.EQUITY, OrderSide.BUY
+        )
+        log.info(
+            "Loaded %d Public-buyable equity symbol(s) for basket validation.",
+            len(public_buyable_symbols),
+        )
     for symbol in ranked:
         if symbol not in public_buyable_symbols:
             untradable_seen.append(symbol)
@@ -1485,15 +1487,34 @@ def rebalance(dry_run: bool = False) -> None:
         )
         return
 
-    constituents = fetch_constituents(index)
-    market_caps = fetch_market_caps(constituents, index)
-
     log.info("Connecting to Public.com…")
     client = get_client()
     try:
         log.info("--- Selecting Public-tradable stock basket ---")
+        public_buyable_symbols = get_tradable_instrument_symbols(
+            client, InstrumentType.EQUITY, OrderSide.BUY
+        )
+        log.info(
+            "Loaded %d Public-buyable equity symbol(s) for basket validation.",
+            len(public_buyable_symbols),
+        )
+
+        constituents = fetch_constituents(index)
+        tradable_constituents = [t for t in constituents if t in public_buyable_symbols]
+        log.info(
+            "Filtered constituents to %d / %d Public-tradable tickers.",
+            len(tradable_constituents),
+            len(constituents),
+        )
+        market_caps = fetch_market_caps(tradable_constituents, index)
+
         top_stocks = select_public_tradable_stocks(
-            client, constituents, market_caps, top_n, excluded_tickers
+            client,
+            tradable_constituents,
+            market_caps,
+            top_n,
+            excluded_tickers,
+            public_buyable_symbols,
         )
         if not top_stocks:
             log.error(

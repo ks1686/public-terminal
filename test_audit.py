@@ -242,6 +242,12 @@ class OrderSafetyTests(unittest.TestCase):
                     "cash": Decimal("0"),
                 },
             ),
+            patch.object(rebalance_mod, "get_client", return_value=fake_client),
+            patch.object(
+                rebalance_mod,
+                "get_tradable_instrument_symbols",
+                return_value={"AAPL"},
+            ),
             patch.object(rebalance_mod, "fetch_constituents", return_value=["AAPL"]),
             patch.object(
                 rebalance_mod, "fetch_market_caps", return_value={"AAPL": 1_000_000}
@@ -249,7 +255,6 @@ class OrderSafetyTests(unittest.TestCase):
             patch.object(
                 rebalance_mod, "select_public_tradable_stocks", return_value=["AAPL"]
             ),
-            patch.object(rebalance_mod, "get_client", return_value=fake_client),
             patch.object(
                 rebalance_mod,
                 "get_portfolio_snapshot",

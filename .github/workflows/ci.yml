@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Compile check
+        run: |
+          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py
+
+      - name: Import smoke check
+        run: |
+          uv run python -c "import app, client, config, main, modals, rebalance, widgets"
+
+      - name: Unit tests
+        run: |
+          uv run python -m unittest discover -v -p "test_*.py"

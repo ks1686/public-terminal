@@ -42,33 +42,21 @@ class InstrumentLookup:
         return self.trading in {"BUY_AND_SELL", "LIQUIDATION_ONLY"}
 
 
-def get_client() -> PublicApiClient:
-    """Create and return an authenticated PublicApiClient.
-
-    Both env vars are API secret keys — the SDK exchanges them for short-lived
-    bearer tokens automatically via ApiKeyAuthConfig.
-
-    Required for this app:
-      PUBLIC_ACCOUNT_NUMBER — default account used by portfolio/order calls
-    """
+def get_client(account_id: str) -> PublicApiClient:
+    """Create and return an authenticated PublicApiClient for the given account."""
     access_token = os.environ.get("PUBLIC_ACCESS_TOKEN")
     api_secret_key = os.environ.get("PUBLIC_API_SECRET_KEY")
 
     if not access_token and not api_secret_key:
-        raise RuntimeError(
-            "No credentials found. Set PUBLIC_ACCESS_TOKEN or PUBLIC_API_SECRET_KEY in .env"
-        )
+        raise RuntimeError("No credentials found. Set PUBLIC_ACCESS_TOKEN in .env")
 
-    account_number = os.environ.get("PUBLIC_ACCOUNT_NUMBER")
-    if not account_number:
-        raise RuntimeError("No account number found. Set PUBLIC_ACCOUNT_NUMBER in .env")
+    if not account_id or not account_id.strip():
+        raise RuntimeError("account_id must be a non-empty string.")
 
-    config = PublicApiClientConfiguration(default_account_number=account_number)
-
+    cfg = PublicApiClientConfiguration(default_account_number=account_id.upper().strip())
     secret = access_token or api_secret_key
     auth = ApiKeyAuthConfig(api_secret_key=secret)
-
-    return PublicApiClient(auth_config=auth, config=config)
+    return PublicApiClient(auth_config=auth, config=cfg)
 
 
 def get_instrument_lookup(

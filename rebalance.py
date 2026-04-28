@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -47,13 +48,14 @@ from client import (
 from config import (
     _ACTIVE_ORDER_STATUSES,
     BROKER_TO_YF_SYMBOLS,
-    CACHE_DIR,
-    MARKET_CAP_CACHE_FILE,
-    REBALANCE_CONFIG_FILE,
-    REBALANCE_LOG_FILE,
-    SKIP_FILE,
-    TODAY_BUYS_FILE,
     YF_TO_BROKER_SYMBOLS,
+    get_accounts,
+    get_cache_dir,
+    get_market_cap_cache_path,
+    get_rebalance_config_path,
+    get_rebalance_log_path,
+    get_skip_file_path,
+    get_today_buys_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -105,18 +107,23 @@ ORDER_STATUS_POLL_SECONDS = 2.0
 # Logging
 # ---------------------------------------------------------------------------
 
-CACHE_DIR.mkdir(exist_ok=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(REBALANCE_LOG_FILE),
-    ],
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
+
+
+def _attach_rebalance_log_file(log_path: Path) -> None:
+    """Attach the per-account rebalance log file once."""
+    root = logging.getLogger()
+    resolved = str(log_path.resolve())
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler) and handler.baseFilename == resolved:
+            return
+    root.addHandler(logging.FileHandler(log_path))
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +159,21 @@ SUPPORTED_INDEXES: dict[str, str] = {
 }
 
 
-def _load_config_json() -> dict:
+def _first_account_path(path_fn) -> Path | None:
+    accounts = get_accounts()
+    if not accounts:
+        return None
+    return path_fn(accounts[0])
+
+
+def _load_config_json(config_file: Path | None = None) -> dict:
     """Load rebalance_config.json once; returns {} on any error."""
+    if config_file is None:
+        config_file = _first_account_path(get_rebalance_config_path)
+        if config_file is None:
+            return {}
     try:
-        return json.loads(REBALANCE_CONFIG_FILE.read_text())
+        return json.loads(config_file.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
@@ -244,13 +262,17 @@ def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
 # ---------------------------------------------------------------------------
 
 
-def load_today_buys() -> frozenset[str]:
+def load_today_buys(today_buys_file: Path | None = None) -> frozenset[str]:
     """
     Return the set of equity symbols that were bought in any rebalance run today.
     Used to prevent selling a position on the same day it was purchased (day trade).
     """
+    if today_buys_file is None:
+        today_buys_file = _first_account_path(get_today_buys_path)
+        if today_buys_file is None:
+            return frozenset()
     try:
-        data = json.loads(TODAY_BUYS_FILE.read_text())
+        data = json.loads(today_buys_file.read_text())
         if data.get("date") == date.today().isoformat():
             return frozenset(data.get("symbols", []))
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
@@ -258,13 +280,17 @@ def load_today_buys() -> frozenset[str]:
     return frozenset()
 
 
-def record_today_buys(symbols: set[str]) -> None:
+def record_today_buys(symbols: set[str], today_buys_file: Path | None = None) -> None:
     """Append equity symbols to today's buy ledger (creates or updates the file)."""
     if not symbols:
         return
-    existing = set(load_today_buys())
+    if today_buys_file is None:
+        today_buys_file = _first_account_path(get_today_buys_path)
+        if today_buys_file is None:
+            return
+    existing = set(load_today_buys(today_buys_file))
     existing.update(symbols)
-    TODAY_BUYS_FILE.write_text(
+    today_buys_file.write_text(
         json.dumps(
             {
                 "date": date.today().isoformat(),
@@ -541,9 +567,15 @@ def fetch_constituents(index: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _load_market_cap_cache(index: str) -> dict[str, float] | None:
+def _load_market_cap_cache(
+    index: str, market_cap_cache_file: Path | None = None
+) -> dict[str, float] | None:
+    if market_cap_cache_file is None:
+        market_cap_cache_file = _first_account_path(get_market_cap_cache_path)
+        if market_cap_cache_file is None:
+            return None
     try:
-        data = json.loads(MARKET_CAP_CACHE_FILE.read_text())
+        data = json.loads(market_cap_cache_file.read_text())
         raw_caps = data.get("caps")
         if not isinstance(raw_caps, dict):
             log.warning("Market cap cache has invalid caps payload — discarding.")
@@ -598,9 +630,16 @@ def _load_market_cap_cache(index: str) -> dict[str, float] | None:
 
 
 def _save_market_cap_cache(
-    caps: dict[str, float], index: str, source_ticker_count: int
+    caps: dict[str, float],
+    index: str,
+    source_ticker_count: int,
+    market_cap_cache_file: Path | None = None,
 ) -> None:
-    MARKET_CAP_CACHE_FILE.write_text(
+    if market_cap_cache_file is None:
+        market_cap_cache_file = _first_account_path(get_market_cap_cache_path)
+        if market_cap_cache_file is None:
+            return
+    market_cap_cache_file.write_text(
         json.dumps(
             {
                 "updated_at": datetime.now().isoformat(),
@@ -627,14 +666,16 @@ def _fetch_one_market_cap(ticker: str) -> tuple[str, float | None]:
     return ticker, None
 
 
-def fetch_market_caps(tickers: list[str], index: str) -> dict[str, float]:
+def fetch_market_caps(
+    tickers: list[str], index: str, market_cap_cache_file: Path | None = None
+) -> dict[str, float]:
     """
     Return {ticker: market_cap} for the given tickers.
     Same-day results are served from a local cache; otherwise fetched in parallel
     using fast_info (~30–60 s for 500 stocks with 20 workers).
     Cache is invalidated automatically when the index changes.
     """
-    cached = _load_market_cap_cache(index)
+    cached = _load_market_cap_cache(index, market_cap_cache_file)
     if cached is not None:
         return cached
 
@@ -676,7 +717,7 @@ def fetch_market_caps(tickers: list[str], index: str) -> dict[str, float]:
     log.info("  → market caps for %d / %d tickers", len(caps), len(tickers))
     min_required = max(1, len(tickers) // 2)
     if len(caps) >= min_required:
-        _save_market_cap_cache(caps, index, len(tickers))
+        _save_market_cap_cache(caps, index, len(tickers), market_cap_cache_file)
     else:
         log.warning(
             "Market cap fetch returned only %d / %d results (threshold: %d) — skipping cache write.",
@@ -1436,7 +1477,27 @@ def compute_unallocated_buy_delta(
 # ---------------------------------------------------------------------------
 
 
-def rebalance(dry_run: bool = False) -> None:
+def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
+    resolved_account = (account_id or "").strip().upper()
+    if not resolved_account:
+        accounts = get_accounts()
+        if not accounts:
+            print(
+                "No accounts configured. Run the TUI to set up an account.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        resolved_account = accounts[0]
+
+    rebalance_config_file = get_rebalance_config_path(resolved_account)
+    rebalance_log_file = get_rebalance_log_path(resolved_account)
+    skip_file = get_skip_file_path(resolved_account)
+    today_buys_file = get_today_buys_path(resolved_account)
+    cache_dir = get_cache_dir(resolved_account)
+    market_cap_cache_file = get_market_cap_cache_path(resolved_account)
+    cache_dir.mkdir(exist_ok=True)
+    _attach_rebalance_log_file(rebalance_log_file)
+
     log.info("=" * 64)
     mode = "DRY-RUN PORTFOLIO REBALANCE" if dry_run else "PORTFOLIO REBALANCE"
     log.info("%s  —  %s", mode, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -1445,7 +1506,7 @@ def rebalance(dry_run: bool = False) -> None:
             "DRY RUN ENABLED — no orders will be placed, no orders will be cancelled, "
             "and the day-trade ledger will not be modified."
         )
-    _cfg = _load_config_json()
+    _cfg = _load_config_json(rebalance_config_file)
     index, top_n, margin_usage_pct, excluded_tickers = load_rebalance_config(_cfg)
     alloc = load_allocation_config(_cfg)
     alloc_stocks = alloc["stocks"]
@@ -1476,19 +1537,19 @@ def rebalance(dry_run: bool = False) -> None:
         )
     log.info("=" * 64)
 
-    if SKIP_FILE.exists() and dry_run:
+    if skip_file.exists() and dry_run:
         log.info(
             "DRY RUN — skip sentinel is present but was not removed; continuing to show plan."
         )
-    elif SKIP_FILE.exists():
-        SKIP_FILE.unlink()
+    elif skip_file.exists():
+        skip_file.unlink()
         log.info(
             "SKIPPED — skip sentinel was set. Removed sentinel; next run will proceed normally."
         )
         return
 
     log.info("Connecting to Public.com…")
-    client = get_client()
+    client = get_client(resolved_account)
     try:
         log.info("--- Selecting Public-tradable stock basket ---")
         public_buyable_symbols = get_tradable_instrument_symbols(
@@ -1506,7 +1567,7 @@ def rebalance(dry_run: bool = False) -> None:
             len(tradable_constituents),
             len(constituents),
         )
-        market_caps = fetch_market_caps(tradable_constituents, index)
+        market_caps = fetch_market_caps(tradable_constituents, index, market_cap_cache_file)
 
         top_stocks = select_public_tradable_stocks(
             client,
@@ -1575,7 +1636,7 @@ def rebalance(dry_run: bool = False) -> None:
         sells: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
         buys: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
 
-        today_buys = load_today_buys()
+        today_buys = load_today_buys(today_buys_file)
         if today_buys:
             log.info(
                 "Day-trade prevention: %d symbol(s) bought earlier today are protected from same-day sells.",
@@ -1849,7 +1910,7 @@ def rebalance(dry_run: bool = False) -> None:
                     for symbol, inst_type, _, _ in submitted_buys
                     if inst_type == InstrumentType.EQUITY
                 }
-                record_today_buys(bought_today)
+                record_today_buys(bought_today, today_buys_file)
 
         except PatternDayTradingError:
             log.error(
@@ -1865,4 +1926,10 @@ def rebalance(dry_run: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    rebalance(dry_run="--dry-run" in sys.argv)
+    args = sys.argv[1:]
+    account_arg = None
+    if "--account" in args:
+        idx = args.index("--account")
+        if idx + 1 < len(args):
+            account_arg = args[idx + 1]
+    rebalance(dry_run="--dry-run" in args, account_id=account_arg)

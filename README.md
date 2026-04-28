@@ -6,6 +6,7 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 
 ## Features
 
+- **Multi-account** — persistent tab bar to switch between accounts; add/remove accounts at runtime
 - **Live portfolio** — holdings, values, quantities, open orders
 - **Manual orders** — market buy and sell for equities, ETFs, and crypto
 - **Portfolio chart** — scrollable price history across all your holdings
@@ -75,8 +76,9 @@ Configure credentials by creating `.env` in the project root:
 
 ```env
 PUBLIC_ACCESS_TOKEN=<your API secret key from public.com>
-PUBLIC_ACCOUNT_NUMBER=<your brokerage account number, e.g. 5OP95222>
 ```
+
+Then launch the app — on first run you will be prompted to enter your account number(s).
 
 Launch:
 
@@ -92,6 +94,7 @@ uv run main.py
 
 ```text
 Header (clock)
+Account Tabs      — one tab per account; switch with Ctrl+Left / Ctrl+Right
 Balance Bar       — total equity, buying power, options BP, crypto BP, cash or margin balance
 Rebalancer Bar    — timer status, active config, key hint strip
 Portfolio Chart   — scrollable price history
@@ -117,6 +120,9 @@ Footer (key bindings)
 | `e` | **Install / remove** the rebalancer schedule |
 | `x` | **Skip the next** scheduled rebalance run |
 | `S` | Open **rebalance settings** modal |
+| `Ctrl+A` | Open **account management** modal (add / remove accounts) |
+| `Ctrl+Left` | Switch to previous account tab |
+| `Ctrl+Right` | Switch to next account tab |
 | `q` | Quit |
 
 ### Placing orders (`b` / `s`)
@@ -166,7 +172,7 @@ Each run:
 7. Places SELL orders first, waits for them to clear, then places BUY orders
 8. BUY orders are capped to the effective buying power budget
 9. Full liquidations (stocks that dropped out of the index) use share-quantity orders to avoid broker rejection
-10. Logs everything to `cache/rebalance.log`
+10. Logs everything to `accounts/<id>/cache/rebalance.log`
 
 ### Margin investing
 
@@ -244,7 +250,7 @@ systemctl --user list-timers public-terminal-rebalance.timer
 
 # Live logs
 journalctl --user -u public-terminal-rebalance.service -f
-tail -f cache/rebalance.log
+tail -f accounts/<id>/cache/rebalance.log
 
 # Stop for this session
 systemctl --user stop public-terminal-rebalance.timer
@@ -277,11 +283,18 @@ For CLI installs (`uv tool install`, `pipx install`), these are stored under
 `~/.config/public-terminal/` (or `$XDG_CONFIG_HOME/public-terminal/`).
 For source runs, they are stored in the project directory.
 
-| File | Purpose |
-|------|---------|
-| `.env` | API credentials (access token, account number) |
-| `rebalance_config.json` | Index, top N, margin %, excluded tickers, target allocations |
-| `cache/rebalance.log` | Full rebalancer run history |
-| `cache/market_caps.json` | Same-day market cap cache (auto-refreshes) |
-| `cache/today_buys.json` | PDT protection ledger (resets daily) |
-| `cache/skip_next_rebalance` | Sentinel file — presence skips one run |
+```text
+.env                              — API access token (shared across all accounts)
+accounts.json                     — ordered list of registered account IDs
+schema_version.json               — internal migration marker
+accounts/<id>/
+  rebalance_config.json           — per-account index, top N, margin %, exclusions
+  cache/rebalance.log             — full rebalancer run history
+  cache/market_caps.json          — same-day market cap cache (auto-refreshes)
+  cache/today_buys.json           — PDT protection ledger (resets daily)
+  cache/skip_next_rebalance       — sentinel file — presence skips one run
+```
+
+### Migrating from v0.1.x
+
+Existing single-account users are migrated automatically on first launch. The app reads `PUBLIC_ACCOUNT_NUMBER` from `.env`, moves `rebalance_config.json` and `cache/` into `accounts/<id>/`, rewrites `.env` with only the token, and writes `accounts.json`. No manual steps required.

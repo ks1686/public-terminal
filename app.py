@@ -107,6 +107,7 @@ class PublicTerminal(App):
         self._margin_capacity = Decimal(0)
         self._live_chart = False
         self._live_timer: Timer | None = None
+        self._chart_snapshots: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -183,13 +184,18 @@ class PublicTerminal(App):
         if not account_id or not self._active_account:
             return
         if account_id != self._active_account:
+            chart = self.query_one(PortfolioChart)
+            self._chart_snapshots[self._active_account] = chart.get_snapshot()
             self._active_account = account_id
             self._client = None
             if self._live_chart:
                 self._live_chart = False
                 if self._live_timer is not None:
                     self._live_timer.pause()
-            self.query_one(PortfolioChart).clear_for_account_switch()
+            if account_id in self._chart_snapshots:
+                chart.restore_snapshot(self._chart_snapshots[account_id])
+            else:
+                chart.clear_for_account_switch()
             self._start_loading()
 
     def action_prev_account(self) -> None:

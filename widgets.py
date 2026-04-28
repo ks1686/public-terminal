@@ -200,6 +200,7 @@ class PortfolioChart(Static):
         self._positions: list[tuple[str, float]] = []
         self._live_enabled = False
         self._live_points: list[tuple[datetime, float]] = []
+        self._last_content = None  # last rendered output for snapshot/restore
 
     @staticmethod
     def _normalize_positions(positions) -> list[tuple[str, float]]:
@@ -229,12 +230,31 @@ class PortfolioChart(Static):
 
         return sorted(by_symbol.items())
 
+    def get_snapshot(self) -> dict:
+        return {
+            "positions": self._positions[:],
+            "period_idx": self._period_idx,
+            "content": self._last_content,
+        }
+
+    def restore_snapshot(self, snapshot: dict) -> None:
+        """Restore a previously saved chart state without triggering a re-fetch."""
+        self._positions = snapshot["positions"]
+        self._period_idx = snapshot["period_idx"]
+        self._live_enabled = False
+        self._live_points.clear()
+        if snapshot["content"] is not None:
+            super().update(snapshot["content"])
+        else:
+            super().update("  Loading chart…")
+
     def clear_for_account_switch(self) -> None:
-        """Reset all chart state immediately when the active account changes."""
+        """Reset chart state when switching to an account with no cached snapshot."""
         self._positions = []
         self._live_points.clear()
         self._live_enabled = False
-        self.update("  Loading chart…")
+        self._last_content = None
+        super().update("  Loading chart…")
 
     def set_positions(self, positions) -> None:
         normalized = self._normalize_positions(positions)
@@ -317,7 +337,9 @@ class PortfolioChart(Static):
         plt.title(title)
         plt.ylabel("$")
         chart_str = plt.build()
-        self.update(RichText.from_ansi(chart_str))
+        rendered = RichText.from_ansi(chart_str)
+        self._last_content = rendered
+        self.update(rendered)
 
     @work(thread=True, exclusive=True)
     def _fetch_chart(self) -> None:
@@ -406,7 +428,9 @@ class PortfolioChart(Static):
             plt.ylabel("$")
             chart_str = plt.build()
 
-            self.app.call_from_thread(self.update, RichText.from_ansi(chart_str))
+            rendered = RichText.from_ansi(chart_str)
+            self._last_content = rendered
+            self.app.call_from_thread(self.update, rendered)
         except Exception as exc:
             self.app.call_from_thread(self.update, f"  Chart error: {exc}")
 

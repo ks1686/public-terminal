@@ -34,6 +34,21 @@ build/
 dist/
 *.spec
 
+# Python packaging artifacts
+public_terminal.egg-info/
+*.egg-info/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
+# Agentic tooling artifacts
+conductor/
+docs/superpowers/plans/
+
 # OS
 .DS_Store
 Thumbs.db

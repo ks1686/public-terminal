@@ -172,6 +172,11 @@ class PublicTerminal(App):
         if account_id != self._active_account:
             self._active_account = account_id
             self._client = None
+            if self._live_chart:
+                self._live_chart = False
+                if self._live_timer is not None:
+                    self._live_timer.pause()
+            self.query_one(PortfolioChart).clear_for_account_switch()
             self._start_loading()
 
     def action_prev_account(self) -> None:

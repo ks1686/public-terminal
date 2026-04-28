@@ -229,6 +229,13 @@ class PortfolioChart(Static):
 
         return sorted(by_symbol.items())
 
+    def clear_for_account_switch(self) -> None:
+        """Reset all chart state immediately when the active account changes."""
+        self._positions = []
+        self._live_points.clear()
+        self._live_enabled = False
+        self.update("  Loading chart…")
+
     def set_positions(self, positions) -> None:
         normalized = self._normalize_positions(positions)
         if normalized == self._positions:

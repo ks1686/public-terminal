@@ -38,6 +38,42 @@ ACCOUNTS_DIR = _APP_DIR / "accounts"
 CURRENT_SCHEMA_VERSION = 1
 
 
+def get_account_dir(account_id: str) -> Path:
+    path = ACCOUNTS_DIR / account_id.upper().strip()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_rebalance_config_path(account_id: str) -> Path:
+    return get_account_dir(account_id) / "rebalance_config.json"
+
+
+def get_cache_dir(account_id: str) -> Path:
+    cache = get_account_dir(account_id) / "cache"
+    cache.mkdir(exist_ok=True)
+    return cache
+
+
+def get_portfolio_cache_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "portfolio_cache.json"
+
+
+def get_rebalance_log_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "rebalance.log"
+
+
+def get_today_buys_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "today_buys.json"
+
+
+def get_skip_file_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "skip_next_rebalance"
+
+
+def get_market_cap_cache_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "market_caps.json"
+
+
 def _read_schema_version() -> int:
     """Return the current on-disk schema version, or 0 if absent."""
     try:
@@ -159,6 +195,44 @@ def migrate_if_needed() -> None:
                 return
 
 
+def get_accounts() -> list[str]:
+    """Return ordered list of account IDs from accounts.json. Empty list if missing."""
+    try:
+        data = json.loads(ACCOUNTS_FILE.read_text())
+        return [str(a).upper().strip() for a in data if str(a).strip()]
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+
+def add_account(account_id: str) -> None:
+    """Append account_id to accounts.json and create its directory. No-op if duplicate."""
+    normalized = account_id.upper().strip()
+    accounts = get_accounts()
+    if normalized in accounts:
+        return
+    accounts.append(normalized)
+    ACCOUNTS_FILE.write_text(json.dumps(accounts))
+    get_account_dir(normalized)  # creates directory
+
+
+def remove_account(account_id: str) -> None:
+    """Remove account_id from accounts.json and delete its directory.
+
+    Raises ValueError if it is the last account (must keep at least one).
+    """
+    normalized = account_id.upper().strip()
+    accounts = get_accounts()
+    if normalized not in accounts:
+        return
+    if len(accounts) == 1:
+        raise ValueError("Cannot remove the last account.")
+    accounts.remove(normalized)
+    ACCOUNTS_FILE.write_text(json.dumps(accounts))
+    account_dir = ACCOUNTS_DIR / normalized
+    if account_dir.exists():
+        shutil.rmtree(account_dir)
+
+
 CACHE_DIR = _APP_DIR / "cache"
 PORTFOLIO_CACHE = CACHE_DIR / "portfolio_cache.json"
 MARKET_CAP_CACHE_FILE = CACHE_DIR / "market_caps.json"
@@ -167,46 +241,6 @@ TODAY_BUYS_FILE = CACHE_DIR / "today_buys.json"
 ENV_FILE = _APP_DIR / ".env"
 SKIP_FILE = CACHE_DIR / "skip_next_rebalance"
 REBALANCE_CONFIG_FILE = _APP_DIR / "rebalance_config.json"
-ACCOUNTS_FILE = _APP_DIR / "accounts.json"
-SCHEMA_VERSION_FILE = _APP_DIR / "schema_version.json"
-ACCOUNTS_DIR = _APP_DIR / "accounts"
-CURRENT_SCHEMA_VERSION = 1
-
-
-def get_account_dir(account_id: str) -> Path:
-    path = ACCOUNTS_DIR / account_id.upper().strip()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def get_rebalance_config_path(account_id: str) -> Path:
-    return get_account_dir(account_id) / "rebalance_config.json"
-
-
-def get_cache_dir(account_id: str) -> Path:
-    cache = get_account_dir(account_id) / "cache"
-    cache.mkdir(exist_ok=True)
-    return cache
-
-
-def get_portfolio_cache_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "portfolio_cache.json"
-
-
-def get_rebalance_log_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "rebalance.log"
-
-
-def get_today_buys_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "today_buys.json"
-
-
-def get_skip_file_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "skip_next_rebalance"
-
-
-def get_market_cap_cache_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "market_caps.json"
 
 
 # ---------------------------------------------------------------------------
@@ -345,29 +379,27 @@ def _remove_service_files() -> str:
 
 
 def _credentials_present() -> bool:
-    """Return True if both required env vars are set (from .env or environment)."""
+    """Return True if a token is set and at least one account is registered."""
     from dotenv import load_dotenv
 
     load_dotenv(ENV_FILE)
     token = os.environ.get("PUBLIC_ACCESS_TOKEN") or os.environ.get(
         "PUBLIC_API_SECRET_KEY"
     )
-    return bool(token and os.environ.get("PUBLIC_ACCOUNT_NUMBER"))
+    return bool(token and get_accounts())
 
 
-def _write_env(access_token: str, account_number: str) -> None:
-    """Write (or overwrite) PUBLIC_ACCESS_TOKEN and PUBLIC_ACCOUNT_NUMBER in .env."""
+def _write_env(access_token: str) -> None:
+    """Write (or overwrite) PUBLIC_ACCESS_TOKEN in .env. Token is shared across all accounts."""
     lines: list[str] = []
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text().splitlines():
             key = line.split("=", 1)[0].strip()
-            if key not in ("PUBLIC_ACCESS_TOKEN", "PUBLIC_ACCOUNT_NUMBER"):
+            if key not in ("PUBLIC_ACCESS_TOKEN", "PUBLIC_ACCOUNT_NUMBER", "PUBLIC_API_SECRET_KEY"):
                 lines.append(line)
     lines.append(f"PUBLIC_ACCESS_TOKEN={access_token}")
-    lines.append(f"PUBLIC_ACCOUNT_NUMBER={account_number}")
     ENV_FILE.write_text("\n".join(lines) + "\n")
     os.environ["PUBLIC_ACCESS_TOKEN"] = access_token
-    os.environ["PUBLIC_ACCOUNT_NUMBER"] = account_number
 
 
 # ---------------------------------------------------------------------------

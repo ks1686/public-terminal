@@ -407,21 +407,22 @@ def _write_env(access_token: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_rebalance_config() -> dict:
+def _load_rebalance_config(account_id: str) -> dict:
     try:
-        return json.loads(REBALANCE_CONFIG_FILE.read_text())
+        return json.loads(get_rebalance_config_path(account_id).read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {"index": "SP500", "top_n": 500}
 
 
 def _save_rebalance_config(
+    account_id: str,
     index: str,
     top_n: int,
     margin_usage_pct: float,
     excluded_tickers: list[str],
     allocations: dict[str, float],
 ) -> None:
-    REBALANCE_CONFIG_FILE.write_text(
+    get_rebalance_config_path(account_id).write_text(
         json.dumps(
             {
                 "index": index,

@@ -233,14 +233,7 @@ def remove_account(account_id: str) -> None:
         shutil.rmtree(account_dir)
 
 
-CACHE_DIR = _APP_DIR / "cache"
-PORTFOLIO_CACHE = CACHE_DIR / "portfolio_cache.json"
-MARKET_CAP_CACHE_FILE = CACHE_DIR / "market_caps.json"
-REBALANCE_LOG_FILE = CACHE_DIR / "rebalance.log"
-TODAY_BUYS_FILE = CACHE_DIR / "today_buys.json"
 ENV_FILE = _APP_DIR / ".env"
-SKIP_FILE = CACHE_DIR / "skip_next_rebalance"
-REBALANCE_CONFIG_FILE = _APP_DIR / "rebalance_config.json"
 
 
 # ---------------------------------------------------------------------------

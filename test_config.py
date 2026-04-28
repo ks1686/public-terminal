@@ -24,8 +24,6 @@ def _patch_config_paths(tmp: Path):
         SCHEMA_VERSION_FILE=schema_file,
         ACCOUNTS_DIR=accounts_dir,
         ENV_FILE=env_file,
-        REBALANCE_CONFIG_FILE=tmp / "rebalance_config.json",
-        CACHE_DIR=tmp / "cache",
     )
 
 
@@ -113,7 +111,12 @@ class TestMigration(unittest.TestCase):
         schema_file.write_text(json.dumps({"version": config.CURRENT_SCHEMA_VERSION}))
 
         with _patch_config_paths(self.tmp):
-            config.migrate_if_needed()  # should not raise
+            config.migrate_if_needed()
+
+        self.assertEqual(
+            json.loads(schema_file.read_text())["version"],
+            config.CURRENT_SCHEMA_VERSION,
+        )
 
 
 class TestAccountCRUD(unittest.TestCase):

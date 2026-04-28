@@ -133,11 +133,15 @@ class SetupModal(ModalScreen[bool]):
 
         token = self.query_one("#input-token", Input).value.strip()
         error_label = self.query_one("#setup-error", Label)
-        # Auto-add any valid account still in the input field
+        # Auto-add any account still in the input field; show error if invalid
         pending = self.query_one("#input-account", Input).value.strip().upper()
         if pending and pending not in self._accounts:
             if pending.isalnum() and 4 <= len(pending) <= 12:
                 self._accounts.append(pending)
+            else:
+                error_label.update("Account number must be 4–12 alphanumeric characters.")
+                self.query_one("#input-account", Input).focus()
+                return
         if not token:
             error_label.update("API access token is required.")
             self.query_one("#input-token", Input).focus()
@@ -935,15 +939,18 @@ class AccountManagementModal(ModalScreen[None]):
         try:
             from client import get_client
             client = get_client(account)
-            client.get_portfolio()
         except RuntimeError:
+            # No credentials — can't validate; treat as offline and allow add
             network_error = True
-        except Exception as exc:
-            msg = str(exc).lower()
-            if any(w in msg for w in ("404", "not found", "unauthorized", "forbidden", "invalid")):
-                api_error = True
-            else:
-                network_error = True
+        else:
+            try:
+                client.get_portfolio()
+            except Exception as exc:
+                msg = str(exc).lower()
+                if any(w in msg for w in ("404", "not found", "unauthorized", "forbidden", "invalid")):
+                    api_error = True
+                else:
+                    network_error = True
 
         def _finish():
             error_label = self.query_one("#acct-error", Label)

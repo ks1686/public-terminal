@@ -166,7 +166,10 @@ class PublicTerminal(App):
         account_id = event.tab.id or ""
         if account_id.startswith("tab-"):
             account_id = account_id[4:]
-        if account_id and account_id != self._active_account:
+        # Guard: if _active_account is not yet set, on_mount will handle initial load
+        if not account_id or not self._active_account:
+            return
+        if account_id != self._active_account:
             self._active_account = account_id
             self._client = None
             self._start_loading()
@@ -520,7 +523,7 @@ class PublicTerminal(App):
                 if pos.quantity
             ]
             self._save_portfolio_cache(
-                str(portfolio.account_id),
+                self._active_account,
                 balance_data,
                 holdings_data,
                 orders_data,

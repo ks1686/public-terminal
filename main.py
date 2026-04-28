@@ -7,6 +7,8 @@ import sys
 def main() -> None:
     args = sys.argv[1:]
     if "--rebalance" in args:
+        from config import migrate_if_needed
+        migrate_if_needed()
         account_id = None
         if "--account" in args:
             idx = args.index("--account")

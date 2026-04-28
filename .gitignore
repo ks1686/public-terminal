@@ -2,7 +2,13 @@
 .env
 *.env
 
+# Multi-account local config — never commit
+accounts.json
+schema_version.json
+accounts/
+
 # Python bytecode
+.worktrees/
 __pycache__/
 *.pyc
 *.pyo

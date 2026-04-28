@@ -190,7 +190,7 @@ def load_rebalance_config(
     Old configs using etf_ticker (SPY, QQQ, DIA, etc.) are migrated automatically.
 
     margin_usage_pct: 0.0 = cash only, 0.5 = 50% of margin capacity, 1.0 = full margin.
-    excluded_tickers: symbols skipped entirely — no buys, no sells.
+    excluded_tickers: symbols blocked from new buys; existing positions are liquidated.
     _cfg: pre-loaded config dict (avoids a second file read when called alongside load_allocation_config).
     """
     try:
@@ -1661,8 +1661,8 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             if order is None:
                 return
             symbol, inst_type, side, amount = order
-            if symbol in excluded_tickers:
-                log.info("  Skipping %s %s — excluded by config.", side.value, symbol)
+            if side == OrderSide.BUY and symbol in excluded_tickers:
+                log.info("  Skipping BUY %s — excluded by config (liquidate only).", symbol)
                 return
             if (
                 side == OrderSide.SELL
@@ -1686,10 +1686,9 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
         for symbol in all_stock_symbols:
             if symbol in NON_STOCK_ETFS:
                 continue
-            if symbol in excluded_tickers:
-                log.info("  Skipping %s — excluded by config.", symbol)
-                continue
             weight = stock_weights.get(symbol, Decimal("0"))
+            if symbol in excluded_tickers:
+                weight = Decimal("0")  # liquidate any held position
             target = (weight * alloc_stocks * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
             queue(
@@ -1699,7 +1698,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             )
 
         def queue_etf_delta(symbol: str, alloc_pct: Decimal) -> None:
-            target = (alloc_pct * investment_base).quantize(Decimal("0.01"))
+            target = Decimal("0") if symbol in excluded_tickers else (alloc_pct * investment_base).quantize(Decimal("0.01"))
             current = equity_pos.get(symbol, Decimal("0"))
             log.info(
                 "  %s  target=$%.2f  current=$%.2f  delta=$%.2f",
@@ -1757,53 +1756,47 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
 
-        if BTC_SYMBOL in excluded_tickers:
-            log.info("--- Skipping BTC delta — excluded by config. ---")
-        else:
-            log.info("--- Computing BTC delta ---")
-            btc_price = crypto_prices.get(BTC_SYMBOL, Decimal("0"))
-            btc_target = (alloc_btc * investment_base).quantize(Decimal("0.01"))
-            btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
-            log.info(
-                "  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-                btc_price,
+        log.info("--- Computing BTC delta ---")
+        btc_price = crypto_prices.get(BTC_SYMBOL, Decimal("0"))
+        btc_target = Decimal("0") if BTC_SYMBOL in excluded_tickers else (alloc_btc * investment_base).quantize(Decimal("0.01"))
+        btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
+        log.info(
+            "  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+            btc_price,
+            btc_target,
+            btc_current,
+            btc_target - btc_current,
+        )
+        queue(
+            compute_delta(
+                BTC_SYMBOL,
+                InstrumentType.CRYPTO,
                 btc_target,
                 btc_current,
-                btc_target - btc_current,
+                Decimal("1.00"),
             )
-            queue(
-                compute_delta(
-                    BTC_SYMBOL,
-                    InstrumentType.CRYPTO,
-                    btc_target,
-                    btc_current,
-                    Decimal("1.00"),
-                )
-            )
+        )
 
-        if ETH_SYMBOL in excluded_tickers:
-            log.info("--- Skipping ETH delta — excluded by config. ---")
-        else:
-            log.info("--- Computing ETH delta ---")
-            eth_price = crypto_prices.get(ETH_SYMBOL, Decimal("0"))
-            eth_target = (alloc_eth * investment_base).quantize(Decimal("0.01"))
-            eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
-            log.info(
-                "  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-                eth_price,
+        log.info("--- Computing ETH delta ---")
+        eth_price = crypto_prices.get(ETH_SYMBOL, Decimal("0"))
+        eth_target = Decimal("0") if ETH_SYMBOL in excluded_tickers else (alloc_eth * investment_base).quantize(Decimal("0.01"))
+        eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
+        log.info(
+            "  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+            eth_price,
+            eth_target,
+            eth_current,
+            eth_target - eth_current,
+        )
+        queue(
+            compute_delta(
+                ETH_SYMBOL,
+                InstrumentType.CRYPTO,
                 eth_target,
                 eth_current,
-                eth_target - eth_current,
+                Decimal("1.00"),
             )
-            queue(
-                compute_delta(
-                    ETH_SYMBOL,
-                    InstrumentType.CRYPTO,
-                    eth_target,
-                    eth_current,
-                    Decimal("1.00"),
-                )
-            )
+        )
 
         log.info("--- Computing GLDM delta ---")
         queue_etf_delta(GOLD_SYMBOL, alloc_gold)

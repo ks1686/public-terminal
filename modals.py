@@ -639,7 +639,7 @@ class RebalanceConfigModal(ModalScreen):
                 "Excluded tickers",
                 classes="field-label",
             )
-            yield Label("Comma-separated; leave blank for none", classes="field-help")
+            yield Label("Comma-separated; leave blank for none. Existing positions will be liquidated.", classes="field-help")
             yield Input(
                 value=excluded_str, placeholder="e.g. TSLA, NVDA", id="input-excluded"
             )

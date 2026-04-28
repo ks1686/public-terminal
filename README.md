@@ -20,9 +20,7 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 
 ## Installation
 
-### Latest release (single command)
-
-Use either command below. Both install the newest GitHub release:
+### Install / upgrade (single command)
 
 ```bash
 uv tool install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest.tar.gz
@@ -32,17 +30,7 @@ uv tool install --force https://github.com/ks1686/public-terminal/releases/lates
 pipx install --force https://github.com/ks1686/public-terminal/releases/latest/download/public_terminal-latest.tar.gz
 ```
 
-### Specific release (single command)
-
-Pin to an exact version by replacing `vX.Y.Z`:
-
-```bash
-uv tool install --force https://github.com/ks1686/public-terminal/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
-```
-
-```bash
-pipx install --force https://github.com/ks1686/public-terminal/releases/download/vX.Y.Z/public_terminal-X.Y.Z-py3-none-any.whl
-```
+Both commands always install the latest release. Re-run at any time to upgrade.
 
 ### Run
 

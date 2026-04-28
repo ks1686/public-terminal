@@ -117,12 +117,15 @@ log = logging.getLogger(__name__)
 
 
 def _attach_rebalance_log_file(log_path: Path) -> None:
-    """Attach the per-account rebalance log file once."""
+    """Switch the file handler to log_path, closing any previous one."""
     root = logging.getLogger()
     resolved = str(log_path.resolve())
-    for handler in root.handlers:
-        if isinstance(handler, logging.FileHandler) and handler.baseFilename == resolved:
-            return
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            if handler.baseFilename == resolved:
+                return
+            root.removeHandler(handler)
+            handler.close()
     root.addHandler(logging.FileHandler(log_path))
 
 
@@ -1487,7 +1490,18 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        resolved_account = accounts[0]
+        enabled = [
+            a for a in accounts
+            if _load_config_json(get_rebalance_config_path(a)).get("rebalance_enabled", True)
+        ]
+        if not enabled:
+            print("No accounts have rebalancing enabled.", file=sys.stderr)
+            sys.exit(0)
+        if len(enabled) > 1:
+            for acct in enabled:
+                rebalance(dry_run=dry_run, account_id=acct)
+            return
+        resolved_account = enabled[0]
 
     rebalance_config_file = get_rebalance_config_path(resolved_account)
     rebalance_log_file = get_rebalance_log_path(resolved_account)

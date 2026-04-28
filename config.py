@@ -404,7 +404,7 @@ def _load_rebalance_config(account_id: str) -> dict:
     try:
         return json.loads(get_rebalance_config_path(account_id).read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"index": "SP500", "top_n": 500}
+        return {"index": "SP500", "top_n": 500, "rebalance_enabled": True}
 
 
 def _save_rebalance_config(
@@ -414,6 +414,7 @@ def _save_rebalance_config(
     margin_usage_pct: float,
     excluded_tickers: list[str],
     allocations: dict[str, float],
+    rebalance_enabled: bool = True,
 ) -> None:
     get_rebalance_config_path(account_id).write_text(
         json.dumps(
@@ -425,6 +426,7 @@ def _save_rebalance_config(
                     set(t.upper().strip() for t in excluded_tickers if t.strip())
                 ),
                 "allocations": allocations,
+                "rebalance_enabled": rebalance_enabled,
             },
             indent=2,
         )

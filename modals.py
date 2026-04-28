@@ -11,7 +11,7 @@ from textual import on, work
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, Select
+from textual.widgets import Button, DataTable, Input, Label, Select, Switch
 
 # config imports are deferred to handler methods to avoid circular imports at module load
 
@@ -599,6 +599,7 @@ class RebalanceConfigModal(ModalScreen):
         current_allocs: dict[str, float],
         margin_enabled: bool | None,
         margin_capacity: Decimal,
+        rebalance_enabled: bool = True,
     ) -> None:
         super().__init__()
         self._current_index = current_index
@@ -608,6 +609,7 @@ class RebalanceConfigModal(ModalScreen):
         self._current_allocs = current_allocs
         self._margin_enabled = margin_enabled
         self._margin_capacity = margin_capacity
+        self._rebalance_enabled = rebalance_enabled
 
     def compose(self):
         from rebalance import SUPPORTED_INDEXES
@@ -620,6 +622,9 @@ class RebalanceConfigModal(ModalScreen):
         margin_capacity = f"${self._margin_capacity:,.2f}"
         with Grid(id="cfg-dialog"):
             yield Label("REBALANCE SETTINGS", id="cfg-title")
+
+            yield Label("Enable automatic rebalancing for this account", classes="field-label")
+            yield Switch(value=self._rebalance_enabled, id="switch-rebalance-enabled")
 
             yield Label("Index & Stocks", id="cfg-section-index")
             yield Label("Index to track", classes="field-label")
@@ -793,6 +798,7 @@ class RebalanceConfigModal(ModalScreen):
         self.query_one("#cfg-error", Label).update("")
         allocations = {k: round(v / 100, 4) for k, v in alloc_pcts.items()}
         excluded = [t.upper().strip() for t in excluded_raw.split(",") if t.strip()]
+        rebalance_enabled = self.query_one("#switch-rebalance-enabled", Switch).value
         self.dismiss(
             {
                 "index": index,
@@ -800,6 +806,7 @@ class RebalanceConfigModal(ModalScreen):
                 "margin_usage_pct": margin_pct,
                 "excluded_tickers": excluded,
                 "allocations": allocations,
+                "rebalance_enabled": rebalance_enabled,
             }
         )
 

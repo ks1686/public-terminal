@@ -139,16 +139,29 @@ class PublicTerminal(App):
             self._active_account = accounts[0] if accounts else ""
             self._start_loading()
 
+    def _sync_tabs(self, accounts: list[str]) -> None:
+        """Diff-update the account tab bar without calling clear().
+
+        Textual's clear() schedules DOM removal asynchronously, so calling
+        add_tab() immediately after raises DuplicateIds. Removing and adding
+        individual tabs avoids this.
+        """
+        tabs = self.query_one("#account-tabs", Tabs)
+        current_ids = {tab.id for tab in tabs.query(Tab)}
+        desired_ids = {f"tab-{acct}" for acct in accounts}
+        for tab_id in current_ids - desired_ids:
+            tabs.remove_tab(tab_id)
+        for acct in accounts:
+            if f"tab-{acct}" not in current_ids:
+                tabs.add_tab(Tab(acct, id=f"tab-{acct}"))
+
     def _handle_setup(self, saved: bool) -> None:
         if not saved:
             self.exit()
             return
         accounts = get_accounts()
         self._active_account = accounts[0] if accounts else ""
-        tabs = self.query_one("#account-tabs", Tabs)
-        tabs.clear()
-        for acct in accounts:
-            tabs.add_tab(Tab(acct, id=f"tab-{acct}"))
+        self._sync_tabs(accounts)
         self.query_one(StatusBar).set_status(
             "  Credentials saved to .env — connecting…" + _HINT
         )
@@ -200,13 +213,10 @@ class PublicTerminal(App):
 
     def _handle_account_management(self, _: None) -> None:
         accounts = get_accounts()
-        tabs = self.query_one("#account-tabs", Tabs)
-        tabs.clear()
-        for acct in accounts:
-            tabs.add_tab(Tab(acct, id=f"tab-{acct}"))
+        self._sync_tabs(accounts)
         if self._active_account not in accounts and accounts:
             self._active_account = accounts[0]
-            tabs.active = f"tab-{self._active_account}"
+            self.query_one("#account-tabs", Tabs).active = f"tab-{self._active_account}"
             self._client = None
             self._start_loading()
 
@@ -904,6 +914,7 @@ class PublicTerminal(App):
                 current_allocs,
                 self._margin_enabled,
                 self._margin_capacity,
+                cfg.get("rebalance_enabled", True),
             ),
             self._handle_rebalance_settings,
         )
@@ -921,6 +932,7 @@ class PublicTerminal(App):
                 result["margin_usage_pct"],
                 result["excluded_tickers"],
                 result["allocations"],
+                result.get("rebalance_enabled", True),
             )
             pct = int(result["margin_usage_pct"] * 100)
             excl = result["excluded_tickers"]
@@ -934,8 +946,9 @@ class PublicTerminal(App):
                 f"gold {round(a['gold'] * 100)}%  "
                 f"cash {round(a['cash'] * 100)}%"
             )
+            enabled_str = "" if result.get("rebalance_enabled", True) else "  REBALANCING DISABLED"
             self.query_one(StatusBar).set_status(
-                f"  Saved: {index_label} top-{result['top_n']}  margin {pct}%{excl_str}  |  {alloc_summary}"
+                f"  Saved: {index_label} top-{result['top_n']}  margin {pct}%{excl_str}  |  {alloc_summary}{enabled_str}"
                 + _HINT,
                 "green",
             )

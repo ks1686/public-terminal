@@ -25,21 +25,23 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
-from textual.widgets import Footer, Header, Label
+from textual.widgets import Footer, Header, Label, Tab, Tabs
 
 from config import (
     _ACTIVE_ORDER_STATUSES,
     _HAS_SYSTEMCTL,
-    PORTFOLIO_CACHE,
-    SKIP_FILE,
     _credentials_present,
     _install_service_files,
     _load_rebalance_config,
     _remove_service_files,
     _save_rebalance_config,
+    get_accounts,
+    get_portfolio_cache_path,
+    get_skip_file_path,
 )
 from client import validate_order_instrument
 from modals import (
+    AccountManagementModal,
     CancelConfirmModal,
     HistoryModal,
     OrderModal,
@@ -69,6 +71,7 @@ class PublicTerminal(App):
     TITLE = "PUBLIC TERMINAL"
     CSS = """
     Screen { background: $surface; }
+    #account-tabs { height: 3; }
     #main-layout { height: 1fr; }
     #left-pane  { width: 2fr; border: tall $primary; }
     #right-pane { width: 1fr; border: tall $accent; }
@@ -91,11 +94,15 @@ class PublicTerminal(App):
         Binding("S", "rebalance_settings", "Settings"),
         Binding("[", "chart_prev", "Chart ◄"),
         Binding("]", "chart_next", "Chart ►"),
+        Binding("ctrl+left", "prev_account", "Prev Account", show=False),
+        Binding("ctrl+right", "next_account", "Next Account", show=False),
+        Binding("ctrl+a", "manage_accounts", "Accounts"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._client = None
+        self._active_account: str = ""
         self._margin_enabled: bool | None = None
         self._margin_capacity = Decimal(0)
         self._live_chart = False
@@ -103,6 +110,11 @@ class PublicTerminal(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        accounts = get_accounts()
+        yield Tabs(
+            *[Tab(acct, id=f"tab-{acct}") for acct in accounts],
+            id="account-tabs",
+        )
         yield BalanceBar(id="balance-bar")
         yield RebalancerBar(id="rebalancer-bar")
         yield PortfolioChart(id="portfolio-chart")
@@ -123,12 +135,20 @@ class PublicTerminal(App):
         if not _credentials_present():
             self.push_screen(SetupModal(), self._handle_setup)
         else:
+            accounts = get_accounts()
+            self._active_account = accounts[0] if accounts else ""
             self._start_loading()
 
     def _handle_setup(self, saved: bool) -> None:
         if not saved:
             self.exit()
             return
+        accounts = get_accounts()
+        self._active_account = accounts[0] if accounts else ""
+        tabs = self.query_one("#account-tabs", Tabs)
+        tabs.clear()
+        for acct in accounts:
+            tabs.add_tab(Tab(acct, id=f"tab-{acct}"))
         self.query_one(StatusBar).set_status(
             "  Credentials saved to .env — connecting…" + _HINT
         )
@@ -140,9 +160,51 @@ class PublicTerminal(App):
         self.load_portfolio()
         self.load_rebalancer_status()
 
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        if event.tab is None:
+            return
+        account_id = event.tab.id or ""
+        if account_id.startswith("tab-"):
+            account_id = account_id[4:]
+        if account_id and account_id != self._active_account:
+            self._active_account = account_id
+            self._client = None
+            self._start_loading()
+
+    def action_prev_account(self) -> None:
+        accounts = get_accounts()
+        if len(accounts) <= 1:
+            return
+        idx = accounts.index(self._active_account) if self._active_account in accounts else 0
+        new_acct = accounts[(idx - 1) % len(accounts)]
+        self.query_one("#account-tabs", Tabs).active = f"tab-{new_acct}"
+
+    def action_next_account(self) -> None:
+        accounts = get_accounts()
+        if len(accounts) <= 1:
+            return
+        idx = accounts.index(self._active_account) if self._active_account in accounts else 0
+        new_acct = accounts[(idx + 1) % len(accounts)]
+        self.query_one("#account-tabs", Tabs).active = f"tab-{new_acct}"
+
+    def action_manage_accounts(self) -> None:
+        self.push_screen(AccountManagementModal(), self._handle_account_management)
+
+    def _handle_account_management(self, _: None) -> None:
+        accounts = get_accounts()
+        tabs = self.query_one("#account-tabs", Tabs)
+        tabs.clear()
+        for acct in accounts:
+            tabs.add_tab(Tab(acct, id=f"tab-{acct}"))
+        if self._active_account not in accounts and accounts:
+            self._active_account = accounts[0]
+            tabs.active = f"tab-{self._active_account}"
+            self._client = None
+            self._start_loading()
+
     def _load_portfolio_cache(self) -> None:
         try:
-            data = json.loads(PORTFOLIO_CACHE.read_text())
+            data = json.loads(get_portfolio_cache_path(self._active_account).read_text())
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return
         b = data.get("balance", {})
@@ -179,9 +241,11 @@ class PublicTerminal(App):
         orders: list[dict],
         positions: list[dict],
     ) -> None:
+        from config import get_portfolio_cache_path
+        path = get_portfolio_cache_path(account_id)
         try:
-            PORTFOLIO_CACHE.parent.mkdir(exist_ok=True)
-            PORTFOLIO_CACHE.write_text(
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(
                 json.dumps(
                     {
                         "account_id": account_id,
@@ -286,8 +350,7 @@ class PublicTerminal(App):
     def _get_client(self):
         if self._client is None:
             from client import get_client
-
-            self._client = get_client()
+            self._client = get_client(self._active_account)
         return self._client
 
     @staticmethod
@@ -318,8 +381,8 @@ class PublicTerminal(App):
     @work(thread=True)
     def load_rebalancer_status(self) -> None:
         if not _HAS_SYSTEMCTL:
-            skip_pending = SKIP_FILE.exists()
-            cfg = _load_rebalance_config()
+            skip_pending = get_skip_file_path(self._active_account).exists()
+            cfg = _load_rebalance_config(self._active_account)
             self.call_from_thread(
                 self.query_one(RebalancerBar).update_status,
                 None,
@@ -361,8 +424,8 @@ class PublicTerminal(App):
         if val and val not in ("n/a", "0", ""):
             next_run = val
 
-        skip_pending = SKIP_FILE.exists()
-        cfg = _load_rebalance_config()
+        skip_pending = get_skip_file_path(self._active_account).exists()
+        cfg = _load_rebalance_config(self._active_account)
         self.call_from_thread(
             self.query_one(RebalancerBar).update_status,
             active,
@@ -735,14 +798,15 @@ class PublicTerminal(App):
 
     def action_skip_next_rebalance(self) -> None:
         status = self.query_one(StatusBar)
+        skip_file = get_skip_file_path(self._active_account)
         try:
-            SKIP_FILE.unlink()
+            skip_file.unlink()
             status.set_status(
                 "  Skip cancelled — next run will proceed normally." + _HINT, "cyan"
             )
         except FileNotFoundError:
-            SKIP_FILE.parent.mkdir(exist_ok=True)
-            SKIP_FILE.touch()
+            skip_file.parent.mkdir(exist_ok=True)
+            skip_file.touch()
             status.set_status(
                 "  Next rebalance run will be skipped. Press [x] again to cancel."
                 + _HINT,
@@ -817,7 +881,7 @@ class PublicTerminal(App):
             SUPPORTED_INDEXES,
         )
 
-        cfg = _load_rebalance_config()
+        cfg = _load_rebalance_config(self._active_account)
         current_index = cfg.get("index") or cfg.get("etf_ticker", "SP500")
         if current_index not in SUPPORTED_INDEXES:
             current_index = _ETF_TO_INDEX.get(current_index, _INDEX_SP500)
@@ -843,6 +907,7 @@ class PublicTerminal(App):
             from rebalance import SUPPORTED_INDEXES
 
             _save_rebalance_config(
+                self._active_account,
                 result["index"],
                 result["top_n"],
                 result["margin_usage_pct"],

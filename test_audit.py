@@ -242,6 +242,7 @@ class OrderSafetyTests(unittest.TestCase):
                     "cash": Decimal("0"),
                 },
             ),
+            patch.object(rebalance_mod, "get_accounts", return_value=["TEST001"]),
             patch.object(rebalance_mod, "get_client", return_value=fake_client),
             patch.object(
                 rebalance_mod,

@@ -401,7 +401,7 @@ class TestDayTradeLedger(unittest.TestCase):
         self._tmp.cleanup()
 
     def _patch(self):
-        return patch.object(rebalance_mod, "TODAY_BUYS_FILE", self._ledger)
+        return patch.object(rebalance_mod, "_first_account_path", return_value=self._ledger)
 
     def test_load_returns_empty_when_file_missing(self) -> None:
         with self._patch():
@@ -527,7 +527,7 @@ class TestConstituentPreFiltering(unittest.TestCase):
 
         captured: list[list[str]] = []
 
-        def fake_fetch_market_caps(tickers, index):
+        def fake_fetch_market_caps(tickers, index, cache_file=None):
             captured.append(list(tickers))
             return {t: float(i + 1) * 1e12 for i, t in enumerate(tickers)}
 
@@ -549,6 +549,7 @@ class TestConstituentPreFiltering(unittest.TestCase):
                     "cash": Decimal("0"),
                 },
             ),
+            patch.object(rebalance_mod, "get_accounts", return_value=["TEST001"]),
             patch.object(rebalance_mod, "get_client", return_value=fake_client),
             patch.object(
                 rebalance_mod,

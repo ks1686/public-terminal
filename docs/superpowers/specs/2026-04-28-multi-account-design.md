@@ -168,6 +168,17 @@ A persistent tab bar is rendered at the top of the TUI, above existing content. 
 - **Add account** — text input for a new account number; validates non-empty and not a duplicate; calls `add_account()` and switches focus to the new account
 - **Remove account** — lists existing accounts with a remove button next to each; the remove button is disabled when only one account remains (must always have at least one)
 
+### Account number validation
+
+Applied in both `SetupModal` and the account management modal before any account is persisted:
+
+1. **Format check** — non-empty, alphanumeric only, reasonable length (e.g., 4–12 characters); show inline error if invalid
+2. **Duplicate check** — not already present in `accounts.json`; show inline error if duplicate
+3. **API reachability check** — call a lightweight authenticated endpoint (e.g., fetch portfolio) with the given account number; if the API returns a 404 or auth error, show an inline error: "Account number not found or not accessible with the current token." Do not persist the account.
+4. **Network failure** — if the API check fails due to a network error (timeout, no connection), show a warning but allow the user to add the account anyway (they may be offline temporarily)
+
+Errors are shown inline in the modal, not as popups, and do not dismiss the modal — the user can correct the input and retry.
+
 ---
 
 ## 7. Data Flow Summary

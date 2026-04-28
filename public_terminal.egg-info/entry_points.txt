@@ -1,0 +1,3 @@
+[console_scripts]
+public-terminal = main:main
+public-terminal-rebalance = rebalance:rebalance

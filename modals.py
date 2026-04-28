@@ -907,7 +907,7 @@ class AccountManagementModal(ModalScreen[None]):
             self._do_add_account()
 
     def _do_add_account(self) -> None:
-        from config import add_account, get_accounts
+        from config import get_accounts
         error_label = self.query_one("#acct-error", Label)
         status_label = self.query_one("#acct-status", Label)
         account = self.query_one("#acct-input", Input).value.strip().upper()

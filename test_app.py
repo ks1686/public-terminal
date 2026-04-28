@@ -1,7 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from app import PublicTerminal
-from public_api_sdk import OrderStatus, OrderSide
 
 @pytest.mark.asyncio
 async def test_app_startup_and_mocked_portfolio():

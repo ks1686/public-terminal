@@ -13,7 +13,7 @@ from textual.containers import Grid, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Select
 
-from config import _write_env
+# config imports are deferred to handler methods to avoid circular imports at module load
 
 INSTRUMENT_OPTIONS = [
     ("Equity / ETF / Stock", "EQUITY"),
@@ -27,14 +27,14 @@ INSTRUMENT_OPTIONS = [
 
 
 class SetupModal(ModalScreen[bool]):
-    """Shown on first launch when credentials are missing. Writes .env on save."""
+    """Shown on first launch when credentials are missing. Writes .env and registers accounts."""
 
     DEFAULT_CSS = """
     SetupModal {
         align: center middle;
     }
     #setup-dialog {
-        width: 72;
+        width: 76;
         height: auto;
         border: thick $warning;
         background: $surface;
@@ -56,6 +56,11 @@ class SetupModal(ModalScreen[bool]):
         margin-top: 1;
         color: $text-muted;
     }
+    #setup-account-list {
+        margin-top: 1;
+        color: $success;
+        height: auto;
+    }
     #setup-btn-row {
         margin-top: 1;
         height: 3;
@@ -66,6 +71,9 @@ class SetupModal(ModalScreen[bool]):
         margin-top: 1;
         color: $error;
     }
+    #setup-btn-add {
+        margin-right: 1;
+    }
     #setup-btn-save {
         margin-right: 2;
     }
@@ -73,46 +81,74 @@ class SetupModal(ModalScreen[bool]):
 
     _INTRO = (
         "No credentials found. Enter your Public.com API details below.\n"
-        "They will be saved to .env in the project directory."
+        "They will be saved to ~/.config/public-terminal/.env"
     )
 
     def compose(self):
+        self._accounts: list[str] = []
         with Grid(id="setup-dialog"):
             yield Label("WELCOME TO PUBLIC TERMINAL", id="setup-title")
             yield Label(self._INTRO, id="setup-intro")
             yield Label(
                 "API Access Token  (Settings → API → Secret Key)", classes="field-label"
             )
-            yield Input(
-                placeholder="your-access-token", password=True, id="input-token"
-            )
-            yield Label("Account Number  (e.g. 5OP95222)", classes="field-label")
-            yield Input(placeholder="e.g. 5OP95222", id="input-account")
+            yield Input(placeholder="your-access-token", password=True, id="input-token")
+            yield Label("Account Number  (e.g. ACCT0001)", classes="field-label")
+            yield Input(placeholder="e.g. ACCT0001", id="input-account")
             yield Label("", id="setup-error")
+            yield Label("", id="setup-account-list")
             with Horizontal(id="setup-btn-row"):
-                yield Button("Save & Continue", variant="success", id="setup-btn-save")
+                yield Button("Add Another Account", variant="default", id="setup-btn-add")
+                yield Button("Done", variant="success", id="setup-btn-save", disabled=True)
                 yield Button("Quit", variant="error", id="setup-btn-quit")
 
     @on(Button.Pressed, "#setup-btn-quit")
     def do_quit(self) -> None:
         self.dismiss(False)
 
+    @on(Button.Pressed, "#setup-btn-add")
+    def do_add_account(self) -> None:
+        account = self.query_one("#input-account", Input).value.strip().upper()
+        error_label = self.query_one("#setup-error", Label)
+        if not account:
+            error_label.update("Account number is required.")
+            return
+        if not account.isalnum() or not (4 <= len(account) <= 12):
+            error_label.update("Account number must be 4–12 alphanumeric characters.")
+            return
+        if account in self._accounts:
+            error_label.update(f"{account} is already added.")
+            return
+        self._accounts.append(account)
+        error_label.update("")
+        self.query_one("#input-account", Input).value = ""
+        self.query_one("#setup-account-list", Label).update(
+            "Accounts: " + ", ".join(self._accounts)
+        )
+        self.query_one("#setup-btn-save", Button).disabled = False
+
     @on(Button.Pressed, "#setup-btn-save")
     def do_save(self) -> None:
+        from config import _write_env, add_account
+
         token = self.query_one("#input-token", Input).value.strip()
-        account = self.query_one("#input-account", Input).value.strip().upper()
+        error_label = self.query_one("#setup-error", Label)
+        # Auto-add any valid account still in the input field
+        pending = self.query_one("#input-account", Input).value.strip().upper()
+        if pending and pending not in self._accounts:
+            if pending.isalnum() and 4 <= len(pending) <= 12:
+                self._accounts.append(pending)
         if not token:
-            self.query_one("#setup-error", Label).update(
-                "API access token is required."
-            )
+            error_label.update("API access token is required.")
             self.query_one("#input-token", Input).focus()
             return
-        if not account:
-            self.query_one("#setup-error", Label).update("Account number is required.")
-            self.query_one("#input-account", Input).focus()
+        if not self._accounts:
+            error_label.update("Add at least one account number.")
             return
-        self.query_one("#setup-error", Label).update("")
-        _write_env(token, account)
+        error_label.update("")
+        _write_env(token)
+        for acct in self._accounts:
+            add_account(acct)
         self.dismiss(True)
 
 

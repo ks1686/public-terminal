@@ -32,6 +32,133 @@ def _app_dir() -> Path:
 
 _APP_DIR = _app_dir()
 
+ACCOUNTS_FILE = _APP_DIR / "accounts.json"
+SCHEMA_VERSION_FILE = _APP_DIR / "schema_version.json"
+ACCOUNTS_DIR = _APP_DIR / "accounts"
+CURRENT_SCHEMA_VERSION = 1
+
+
+def _read_schema_version() -> int:
+    """Return the current on-disk schema version, or 0 if absent."""
+    try:
+        return int(json.loads(SCHEMA_VERSION_FILE.read_text()).get("version", 0))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def _write_schema_version(version: int) -> None:
+    SCHEMA_VERSION_FILE.write_text(json.dumps({"version": version}))
+
+
+def _migrate_v0_to_v1() -> None:
+    """Migrate from schema v0 to v1.
+
+    v0 (legacy single-account layout):
+      .env                      — PUBLIC_ACCESS_TOKEN + PUBLIC_ACCOUNT_NUMBER
+      rebalance_config.json     — flat, at config root
+      cache/                    — flat, at config root
+
+    v1 (multi-account layout):
+      .env                      — PUBLIC_ACCESS_TOKEN only
+      accounts.json             — ["<account_number>"]
+      schema_version.json       — {"version": 1}
+      accounts/<id>/
+        rebalance_config.json
+        cache/
+
+    Why: Introduced per-account subdirectories to support multiple accounts
+    with independent settings and caches.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv(ENV_FILE)
+    account_id = os.environ.get("PUBLIC_ACCOUNT_NUMBER", "").strip().upper()
+    if not account_id:
+        # .env had no account number — nothing to migrate, write v1 marker only
+        _write_schema_version(1)
+        return
+
+    account_dir = ACCOUNTS_DIR / account_id
+    account_dir.mkdir(parents=True, exist_ok=True)
+
+    old_config = _APP_DIR / "rebalance_config.json"
+    new_config = account_dir / "rebalance_config.json"
+    if old_config.exists() and not new_config.exists():
+        try:
+            shutil.move(str(old_config), str(new_config))
+        except OSError as exc:
+            print(f"[migration v0→v1] could not move rebalance_config.json: {exc}", file=sys.stderr)
+
+    old_cache = _APP_DIR / "cache"
+    new_cache = account_dir / "cache"
+    if old_cache.exists() and not new_cache.exists():
+        try:
+            shutil.move(str(old_cache), str(new_cache))
+        except OSError as exc:
+            print(f"[migration v0→v1] could not move cache/: {exc}", file=sys.stderr)
+
+    # Rewrite .env — keep only PUBLIC_ACCESS_TOKEN
+    token = os.environ.get("PUBLIC_ACCESS_TOKEN") or os.environ.get("PUBLIC_API_SECRET_KEY", "")
+    if ENV_FILE.exists():
+        lines = [
+            line for line in ENV_FILE.read_text().splitlines()
+            if line.split("=", 1)[0].strip() not in (
+                "PUBLIC_ACCOUNT_NUMBER", "PUBLIC_ACCESS_TOKEN", "PUBLIC_API_SECRET_KEY"
+            )
+        ]
+        if token:
+            lines.append(f"PUBLIC_ACCESS_TOKEN={token}")
+        try:
+            ENV_FILE.write_text("\n".join(lines) + "\n")
+        except OSError as exc:
+            print(f"[migration v0→v1] could not rewrite .env: {exc}", file=sys.stderr)
+
+    if not ACCOUNTS_FILE.exists():
+        try:
+            ACCOUNTS_FILE.write_text(json.dumps([account_id]))
+        except OSError as exc:
+            print(f"[migration v0→v1] could not write accounts.json: {exc}", file=sys.stderr)
+
+    _write_schema_version(1)
+
+
+# Each entry: (from_version: int, migration_fn: Callable[[], None])
+# Add new migrations in ascending order. Never remove or reorder existing entries.
+MIGRATIONS: list[tuple[int, object]] = [
+    (0, _migrate_v0_to_v1),
+]
+
+
+def migrate_if_needed() -> None:
+    """Run any outstanding schema migrations at startup.
+
+    Call this once before any other config function. Safe to call multiple
+    times — already-applied migrations are skipped.
+
+    Edge case: if schema_version.json is absent but accounts/ exists,
+    treat as v1 to avoid overwriting existing account data.
+    """
+    if not SCHEMA_VERSION_FILE.exists() and ACCOUNTS_DIR.exists():
+        _write_schema_version(CURRENT_SCHEMA_VERSION)
+        return
+
+    current = _read_schema_version()
+    if current >= CURRENT_SCHEMA_VERSION:
+        return
+
+    for from_version, fn in MIGRATIONS:
+        if from_version >= current:
+            try:
+                fn()
+                current = from_version + 1
+            except Exception as exc:
+                print(
+                    f"[migration v{from_version}→v{from_version + 1}] failed: {exc}",
+                    file=sys.stderr,
+                )
+                return
+
+
 CACHE_DIR = _APP_DIR / "cache"
 PORTFOLIO_CACHE = CACHE_DIR / "portfolio_cache.json"
 MARKET_CAP_CACHE_FILE = CACHE_DIR / "market_caps.json"
@@ -40,6 +167,46 @@ TODAY_BUYS_FILE = CACHE_DIR / "today_buys.json"
 ENV_FILE = _APP_DIR / ".env"
 SKIP_FILE = CACHE_DIR / "skip_next_rebalance"
 REBALANCE_CONFIG_FILE = _APP_DIR / "rebalance_config.json"
+ACCOUNTS_FILE = _APP_DIR / "accounts.json"
+SCHEMA_VERSION_FILE = _APP_DIR / "schema_version.json"
+ACCOUNTS_DIR = _APP_DIR / "accounts"
+CURRENT_SCHEMA_VERSION = 1
+
+
+def get_account_dir(account_id: str) -> Path:
+    path = ACCOUNTS_DIR / account_id.upper().strip()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_rebalance_config_path(account_id: str) -> Path:
+    return get_account_dir(account_id) / "rebalance_config.json"
+
+
+def get_cache_dir(account_id: str) -> Path:
+    cache = get_account_dir(account_id) / "cache"
+    cache.mkdir(exist_ok=True)
+    return cache
+
+
+def get_portfolio_cache_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "portfolio_cache.json"
+
+
+def get_rebalance_log_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "rebalance.log"
+
+
+def get_today_buys_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "today_buys.json"
+
+
+def get_skip_file_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "skip_next_rebalance"
+
+
+def get_market_cap_cache_path(account_id: str) -> Path:
+    return get_cache_dir(account_id) / "market_caps.json"
 
 
 # ---------------------------------------------------------------------------

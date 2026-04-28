@@ -25,14 +25,22 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
+      - name: Run Ruff Linting
+        run: uv run ruff check .
+
+      - name: Run Bandit Security Scan
+        run: uv run bandit -r . -c "pyproject.toml" -ll -ii
+
       - name: Compile check
         run: |
-          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py test_config.py
+          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py test_config.py test_app.py
 
       - name: Import smoke check
         run: |
           uv run python -c "import app, client, config, main, modals, rebalance, widgets"
 
-      - name: Unit tests
-        run: |
-          uv run python -m unittest discover -v -p "test_*.py"
+      - name: Run Pytest with Coverage
+        run: uv run pytest --cov=. --cov-report=xml --cov-report=term-missing -v
+        env:
+          PUBLIC_ACCESS_TOKEN: "mock_token_for_tests"
+          PUBLIC_ACCOUNT_NUMBER: "mock_account_for_tests"

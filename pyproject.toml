@@ -34,3 +34,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.2.0",
 ]
+
+[tool.bandit]
+exclude_dirs = ["tests", "test_*.py", ".venv", "build", "dist"]
+skips = ["B101", "B310"] # B310 is urlopen which we use for fetching market caps

@@ -9,7 +9,7 @@ from public_api_sdk import HistoryRequest, OrderSide
 from rich.text import Text
 from textual import on, work
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal
+from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Select
 
@@ -798,3 +798,167 @@ class RebalanceConfigModal(ModalScreen):
                 "allocations": allocations,
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Account management
+# ---------------------------------------------------------------------------
+
+
+class AccountManagementModal(ModalScreen[None]):
+    """Manage accounts: add new ones (with API validation) or remove existing ones."""
+
+    DEFAULT_CSS = """
+    AccountManagementModal {
+        align: center middle;
+    }
+    #acct-dialog {
+        width: 72;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #acct-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    .acct-row {
+        height: 3;
+        margin-bottom: 1;
+    }
+    .acct-label {
+        width: 1fr;
+        content-align: left middle;
+    }
+    .acct-remove-btn {
+        width: auto;
+    }
+    #acct-add-section {
+        margin-top: 1;
+    }
+    .field-label {
+        height: 1;
+        color: $text-muted;
+    }
+    #acct-error {
+        height: 1;
+        margin-top: 1;
+        color: $error;
+    }
+    #acct-status {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    #acct-btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    """
+
+    def compose(self):
+        from config import get_accounts
+        self._accounts = get_accounts()
+        with Grid(id="acct-dialog"):
+            yield Label("ACCOUNT MANAGEMENT", id="acct-title")
+            for acct in self._accounts:
+                with Horizontal(classes="acct-row"):
+                    yield Label(acct, classes="acct-label", id=f"acct-label-{acct}")
+                    yield Button(
+                        "Remove",
+                        variant="error",
+                        classes="acct-remove-btn",
+                        id=f"acct-remove-{acct}",
+                        disabled=len(self._accounts) == 1,
+                    )
+            with Vertical(id="acct-add-section"):
+                yield Label("Add Account Number", classes="field-label")
+                yield Input(placeholder="e.g. ACCT0002", id="acct-input")
+                yield Label("", id="acct-error")
+                yield Label("", id="acct-status")
+            with Horizontal(id="acct-btn-row"):
+                yield Button("Add Account", variant="success", id="acct-btn-add")
+                yield Button("Close", variant="default", id="acct-btn-close")
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        from config import remove_account
+        btn_id = event.button.id or ""
+        if btn_id.startswith("acct-remove-"):
+            acct = btn_id[len("acct-remove-"):]
+            try:
+                remove_account(acct)
+                self._accounts.remove(acct)
+            except ValueError as exc:
+                self.query_one("#acct-error", Label).update(str(exc))
+                return
+            self.dismiss(None)
+        elif btn_id == "acct-btn-close":
+            self.dismiss(None)
+        elif btn_id == "acct-btn-add":
+            self._do_add_account()
+
+    def _do_add_account(self) -> None:
+        from config import add_account, get_accounts
+        error_label = self.query_one("#acct-error", Label)
+        status_label = self.query_one("#acct-status", Label)
+        account = self.query_one("#acct-input", Input).value.strip().upper()
+
+        error_label.update("")
+        status_label.update("")
+
+        if not account:
+            error_label.update("Account number is required.")
+            return
+        if not account.isalnum() or not (4 <= len(account) <= 12):
+            error_label.update("Account number must be 4–12 alphanumeric characters.")
+            return
+        if account in get_accounts():
+            error_label.update(f"{account} is already registered.")
+            return
+
+        status_label.update("Validating with Public.com…")
+        self._validate_and_add(account)
+
+    @work(thread=True)
+    def _validate_and_add(self, account: str) -> None:
+        from config import ENV_FILE, add_account
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE)
+
+        network_error = False
+        api_error = False
+        try:
+            from client import get_client
+            client = get_client(account)
+            client.get_portfolio()
+        except RuntimeError:
+            network_error = True
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(w in msg for w in ("404", "not found", "unauthorized", "forbidden", "invalid")):
+                api_error = True
+            else:
+                network_error = True
+
+        def _finish():
+            error_label = self.query_one("#acct-error", Label)
+            status_label = self.query_one("#acct-status", Label)
+            status_label.update("")
+            if api_error:
+                error_label.update(
+                    "Account not found or not accessible with the current token."
+                )
+                return
+            if network_error:
+                error_label.update(
+                    "Network error — account added anyway. Verify when online."
+                )
+            add_account(account)
+            self.dismiss(None)
+
+        self.call_from_thread(_finish)

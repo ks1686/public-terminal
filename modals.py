@@ -968,4 +968,4 @@ class AccountManagementModal(ModalScreen[None]):
             add_account(account)
             self.dismiss(None)
 
-        self.call_from_thread(_finish)
+        self.app.call_from_thread(_finish)

@@ -28,9 +28,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
+      - name: Run Ruff Linting
+        run: uv run ruff check .
+
+      - name: Run Bandit Security Scan
+        run: uv run bandit -r . -c "pyproject.toml" -ll -ii
+
       - name: Compile check
         run: |
-          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py
+          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py test_config.py test_app.py
 
       - name: Import smoke check
         run: |

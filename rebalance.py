@@ -1003,32 +1003,26 @@ def estimate_margin_state(
     Return (portfolio_nav, current_margin_loan, allowed_margin_loan,
     investment_base, effective_buying_power).
 
-    The configured margin percentage is applied to margin buying-power capacity:
-    current margin debt plus currently available margin buying power. Existing
-    margin debt, including withdrawal loans, consumes that allowance before any
-    new buy orders are allowed.
-    """
-    margin_buying_power = max(Decimal("0"), buying_power - cash_only_buying_power)
-    margin_available = margin_buying_power > Decimal("0") or cash_balance < Decimal("0")
-    if cash_balance < Decimal("0"):
-        current_margin_loan = -cash_balance
-    elif margin_available:
-        current_margin_loan = max(
-            Decimal("0"),
-            total_equity + cash_balance - margin_buying_power,
-        )
-    else:
-        current_margin_loan = Decimal("0")
+    All values are derived directly from broker-reported fields.
+    cash_balance (which can be negative from unsettled T+1/T+2 trades) affects
+    portfolio_nav only — it is never treated as a margin loan.
 
+    current_margin_loan is a display-only estimate and plays no role in
+    investment_base or effective_buying_power calculations.
+    """
     portfolio_nav = max(Decimal("0"), total_equity + cash_balance)
-    margin_capacity = current_margin_loan + margin_buying_power
-    allowed_margin_loan = (
-        margin_usage_pct * margin_capacity if margin_available else Decimal("0")
-    )
+    margin_capacity = max(Decimal("0"), buying_power - cash_only_buying_power)
+    allowed_margin_loan = margin_usage_pct * margin_capacity
     investment_base = portfolio_nav + allowed_margin_loan
     effective_buying_power = max(
-        Decimal("0"),
-        cash_only_buying_power + allowed_margin_loan - current_margin_loan,
+        Decimal("0"), cash_only_buying_power + allowed_margin_loan
+    )
+    # Display-only: estimate current borrowing from negative cash when the broker
+    # reports margin capacity. Never used in any calculation.
+    current_margin_loan = (
+        max(Decimal("0"), -cash_balance)
+        if margin_capacity > Decimal("0")
+        else Decimal("0")
     )
     return (
         portfolio_nav,

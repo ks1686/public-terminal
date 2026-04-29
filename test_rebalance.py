@@ -300,7 +300,7 @@ class TestMarketCapRanking(unittest.TestCase):
 
 
 class TestEstimateMarginState(unittest.TestCase):
-    def test_cash_only_account_has_no_margin_loan(self) -> None:
+    def test_cash_only_account_no_margin_loan(self) -> None:
         nav, loan, allowed, base, bp = estimate_margin_state(
             total_equity=Decimal("10000"),
             cash_balance=Decimal("500"),
@@ -311,34 +311,64 @@ class TestEstimateMarginState(unittest.TestCase):
         self.assertEqual(loan, Decimal("0"))
         self.assertEqual(allowed, Decimal("0"))
         self.assertEqual(bp, Decimal("500"))
+        self.assertEqual(nav, Decimal("10500"))
+        self.assertEqual(base, Decimal("10500"))
 
-    def test_negative_cash_balance_is_detected_as_margin_loan(self) -> None:
-        _, loan, *_ = estimate_margin_state(
+    def test_negative_cash_balance_does_not_reduce_effective_buying_power(self) -> None:
+        # Negative cash = unsettled T+1 trades, NOT a margin loan.
+        # broker reports buying_power == cash_only_buying_power → no margin offered.
+        _, loan, _, _, bp = estimate_margin_state(
             total_equity=Decimal("10000"),
             cash_balance=Decimal("-2000"),
             buying_power=Decimal("3000"),
             cash_only_buying_power=Decimal("3000"),
             margin_usage_pct=Decimal("0.5"),
         )
-        self.assertEqual(loan, Decimal("2000"))
+        # No margin capacity → loan display is 0, effective BP = cash_only_bp
+        self.assertEqual(loan, Decimal("0"))
+        self.assertEqual(bp, Decimal("3000"))
 
     def test_margin_allowed_scales_with_usage_pct(self) -> None:
-        # margin_buying_power = buying_power - cash_only_buying_power = 1000
-        _, _, allowed_50, *_ = estimate_margin_state(
+        # margin_capacity = buying_power - cash_only_buying_power = 1000
+        _, _, allowed_50, _, _ = estimate_margin_state(
             total_equity=Decimal("10000"),
             cash_balance=Decimal("500"),
             buying_power=Decimal("1500"),
             cash_only_buying_power=Decimal("500"),
             margin_usage_pct=Decimal("0.5"),
         )
-        _, _, allowed_100, *_ = estimate_margin_state(
+        _, _, allowed_100, _, _ = estimate_margin_state(
             total_equity=Decimal("10000"),
             cash_balance=Decimal("500"),
             buying_power=Decimal("1500"),
             cash_only_buying_power=Decimal("500"),
             margin_usage_pct=Decimal("1.0"),
         )
+        self.assertEqual(allowed_50, Decimal("500"))
+        self.assertEqual(allowed_100, Decimal("1000"))
         self.assertGreater(allowed_100, allowed_50)
+
+    def test_effective_bp_includes_allowed_margin(self) -> None:
+        # cash_only_bp=500, margin_capacity=1000, usage=50% → allowed=500 → effective=1000
+        _, _, _, _, bp = estimate_margin_state(
+            total_equity=Decimal("10000"),
+            cash_balance=Decimal("500"),
+            buying_power=Decimal("1500"),
+            cash_only_buying_power=Decimal("500"),
+            margin_usage_pct=Decimal("0.5"),
+        )
+        self.assertEqual(bp, Decimal("1000"))
+
+    def test_zero_margin_usage_ignores_margin_capacity(self) -> None:
+        _, _, allowed, _, bp = estimate_margin_state(
+            total_equity=Decimal("10000"),
+            cash_balance=Decimal("500"),
+            buying_power=Decimal("2000"),  # broker offers $1500 margin
+            cash_only_buying_power=Decimal("500"),
+            margin_usage_pct=Decimal("0"),
+        )
+        self.assertEqual(allowed, Decimal("0"))
+        self.assertEqual(bp, Decimal("500"))  # only cash
 
     def test_portfolio_nav_is_non_negative(self) -> None:
         nav, *_ = estimate_margin_state(
@@ -349,6 +379,18 @@ class TestEstimateMarginState(unittest.TestCase):
             margin_usage_pct=Decimal("0"),
         )
         self.assertGreaterEqual(nav, Decimal("0"))
+
+    def test_margin_loan_display_uses_negative_cash_when_margin_offered(self) -> None:
+        # Broker offers margin (buying_power > cash_only_buying_power) AND cash is negative
+        # → displayed loan = abs(cash_balance)
+        _, loan, _, _, _ = estimate_margin_state(
+            total_equity=Decimal("10000"),
+            cash_balance=Decimal("-1500"),
+            buying_power=Decimal("2000"),
+            cash_only_buying_power=Decimal("500"),
+            margin_usage_pct=Decimal("0"),
+        )
+        self.assertEqual(loan, Decimal("1500"))
 
 
 # ---------------------------------------------------------------------------

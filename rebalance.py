@@ -1371,51 +1371,6 @@ def wait_for_orders_to_clear(
     return True
 
 
-def cap_buy_orders_to_buying_power(
-    orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
-    buying_power: Decimal,
-) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
-    """
-    Keep only the prefix of buy orders that fits within currently available buying power.
-    """
-    available_budget = max(Decimal("0"), buying_power - BUYING_POWER_BUFFER)
-    if available_budget <= 0:
-        log.warning(
-            "No buy orders will be placed: buying power is only $%.2f.", buying_power
-        )
-        return []
-
-    selected: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
-    skipped: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
-    remaining = available_budget
-    for order in orders:
-        amount = order[3]
-        if amount <= remaining:
-            selected.append(order)
-            remaining -= amount
-        else:
-            skipped.append(order)
-
-    total_selected = sum(order[3] for order in selected)
-    total_skipped = sum(order[3] for order in skipped)
-    log.info(
-        "Buy budget: $%.2f available after buffer, $%.2f selected, $%.2f skipped.",
-        available_budget,
-        total_selected,
-        total_skipped,
-    )
-    if skipped:
-        skipped_symbols = ", ".join(symbol for symbol, *_ in skipped[:10])
-        suffix = "…" if len(skipped) > 10 else ""
-        log.warning(
-            "Skipped %d buy order(s) that exceed buying power: %s%s",
-            len(skipped),
-            skipped_symbols,
-            suffix,
-        )
-    return selected
-
-
 def fill_buy_orders(
     orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
     available_bp: Decimal,
@@ -1928,7 +1883,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
         )
 
         sells.sort(key=lambda order: (order[3], order[0]), reverse=True)
-        buys.sort(key=lambda order: (order[3], order[0]), reverse=True)
+        buys = _sort_buys_by_priority(buys, stock_weights, alloc_stocks, investment_base)
 
         log.info("Rebalance plan: %d sells  |  %d buys", len(sells), len(buys))
         if not sells and not buys:
@@ -1963,7 +1918,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
         if dry_run:
             sells = filter_orders_by_public_tradability(client, sells) if sells else []
             buys = filter_orders_by_public_tradability(client, buys) if buys else []
-            buys = cap_buy_orders_to_buying_power(buys, effective_buying_power)
+            buys = fill_buy_orders(buys, effective_buying_power)
             log.info("--- DRY RUN ORDER PLAN ---")
             log_dry_run_orders(sells, label="sell")
             log_dry_run_orders(buys, label="buy")
@@ -1992,14 +1947,18 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             if buys:
                 buys = filter_orders_by_public_tradability(client, buys)
             if buys:
+                # Re-fetch portfolio state after wave-1 sells
                 post_sell_effective_bp = effective_buying_power
+                post_equity_pos: dict[str, Decimal] = equity_pos
+                post_equity: Decimal = total_equity
+                post_cash_balance: Decimal = cash_balance
                 try:
                     (
                         post_equity,
                         post_cash_balance,
                         post_bp,
                         post_cash_bp,
-                        _,
+                        post_equity_pos,
                         _,
                         _,
                         _,
@@ -2026,7 +1985,73 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
                     )
                 except Exception as exc:
                     log.warning("Could not refresh buying power after sells: %s", exc)
-                buys = cap_buy_orders_to_buying_power(buys, post_sell_effective_bp)
+
+                # Supplemental sells — generate extra sells from lowest-priority
+                # positions if post-sell buying power doesn't cover all buys.
+                total_buy_need = sum(b[3] for b in buys)
+                shortfall = max(Decimal("0"), total_buy_need - post_sell_effective_bp)
+                if shortfall > Decimal("0"):
+                    log.info(
+                        "  Buy shortfall $%.2f — generating supplemental sells from lowest-priority positions.",
+                        shortfall,
+                    )
+                    already_selling = {s for s, *_ in sells}
+                    already_buying = {s for s, *_ in buys}
+                    supplemental = compute_supplemental_sells(
+                        shortfall,
+                        post_equity_pos,
+                        already_selling,
+                        already_buying,
+                        today_buys,
+                        stock_weights,
+                        alloc_stocks,
+                        investment_base,
+                    )
+                    if supplemental:
+                        supplemental = filter_orders_by_public_tradability(
+                            client, supplemental
+                        )
+                    if supplemental:
+                        log.info(
+                            "--- Placing supplemental SELL orders (%d) ---",
+                            len(supplemental),
+                        )
+                        supp_ids, _ = place_orders(
+                            client,
+                            supplemental,
+                            liquidation_quantities={},
+                            crypto_quantities=crypto_qty,
+                        )
+                        if not wait_for_orders_to_clear(
+                            client, supp_ids, label="supplemental sell"
+                        ):
+                            log.warning(
+                                "Supplemental sell orders did not clear — proceeding with available buying power."
+                            )
+                        try:
+                            (_, _, post_bp2, post_cash_bp2, _, _, _, _) = (
+                                get_portfolio_snapshot(client)
+                            )
+                            (_, _, _, _, post_sell_effective_bp) = estimate_margin_state(
+                                post_equity,
+                                post_cash_balance,
+                                post_bp2,
+                                post_cash_bp2,
+                                margin_usage_pct,
+                            )
+                            log.info(
+                                "  Post-supplemental-sell effective BP: $%.2f",
+                                post_sell_effective_bp,
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Could not refresh buying power after supplemental sells: %s",
+                                exc,
+                            )
+                    else:
+                        log.info("  No suitable supplemental sell candidates found.")
+
+                buys = fill_buy_orders(buys, post_sell_effective_bp)
             if buys:
                 log.info("--- Placing BUY orders (%d) ---", len(buys))
                 _, submitted_buys = place_orders(

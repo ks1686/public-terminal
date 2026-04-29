@@ -18,11 +18,13 @@ from rebalance import (
     _clean_tickers,
     _is_intraday_margin_error,
     _is_pdt_error,
-    cap_buy_orders_to_buying_power,
+    _sort_buys_by_priority,
     compute_delta,
     compute_stock_weights,
+    compute_supplemental_sells,
     compute_unallocated_buy_delta,
     estimate_margin_state,
+    fill_buy_orders,
     load_allocation_config,
     load_rebalance_config,
     load_today_buys,
@@ -392,42 +394,6 @@ class TestEstimateMarginState(unittest.TestCase):
         )
         self.assertEqual(loan, Decimal("1500"))
 
-
-
-# ---------------------------------------------------------------------------
-# Buy order budget capping
-# ---------------------------------------------------------------------------
-
-
-class TestCapBuyOrders(unittest.TestCase):
-    _EQUITY = InstrumentType.EQUITY
-
-    def _order(self, symbol: str, amount: str):
-        return (symbol, self._EQUITY, OrderSide.BUY, Decimal(amount))
-
-    def test_all_orders_fit_within_budget(self) -> None:
-        orders = [self._order("AAPL", "10"), self._order("MSFT", "10")]
-        result = cap_buy_orders_to_buying_power(orders, Decimal("30"))
-        self.assertEqual(len(result), 2)
-
-    def test_orders_exceeding_budget_are_dropped(self) -> None:
-        orders = [self._order("AAPL", "50"), self._order("MSFT", "10")]
-        # budget after buffer = 30 - 1 = 29; AAPL needs 50 so only MSFT fits
-        result = cap_buy_orders_to_buying_power(orders, Decimal("30"))
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0][0], "MSFT")
-
-    def test_empty_result_when_buying_power_below_buffer(self) -> None:
-        orders = [self._order("AAPL", "5")]
-        result = cap_buy_orders_to_buying_power(orders, BUYING_POWER_BUFFER)
-        self.assertEqual(result, [])
-
-    def test_empty_orders_returns_empty(self) -> None:
-        result = cap_buy_orders_to_buying_power([], Decimal("1000"))
-        self.assertEqual(result, [])
-
-    def test_buying_power_buffer_is_one_dollar(self) -> None:
-        self.assertEqual(BUYING_POWER_BUFFER, Decimal("1.00"))
 
 
 # ---------------------------------------------------------------------------

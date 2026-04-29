@@ -501,6 +501,200 @@ class TestFillBuyOrders(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Supplemental sell computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSupplementalSells(unittest.TestCase):
+    _EQ = InstrumentType.EQUITY
+
+    def _call(
+        self,
+        shortfall: str,
+        equity_pos: dict,
+        already_selling: set | None = None,
+        already_buying: set | None = None,
+        today_buys: frozenset | None = None,
+        stock_weights: dict | None = None,
+    ):
+        from rebalance import compute_supplemental_sells
+        return compute_supplemental_sells(
+            shortfall=Decimal(shortfall),
+            equity_pos={k: Decimal(str(v)) for k, v in equity_pos.items()},
+            already_selling=already_selling or set(),
+            already_buying=already_buying or set(),
+            today_buys=today_buys or frozenset(),
+            stock_weights={k: Decimal(str(v)) for k, v in (stock_weights or {}).items()},
+            alloc_stocks=Decimal("0.75"),
+            investment_base=Decimal("10000"),
+        )
+
+    def test_sells_lowest_weight_first(self) -> None:
+        # STX weight 0.01 (target $75), AAPL weight 0.15 (target $1125)
+        result = self._call(
+            "60",
+            {"STX": 100, "AAPL": 200},
+            stock_weights={"STX": 0.01, "AAPL": 0.15},
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "STX")
+        self.assertEqual(result[0][3], Decimal("60.00"))
+        self.assertEqual(result[0][2], OrderSide.SELL)
+        self.assertEqual(result[0][1], self._EQ)
+
+    def test_accumulates_across_multiple_candidates(self) -> None:
+        # shortfall $150; STX has $100 (lowest weight), then MSFT covers rest
+        result = self._call(
+            "150",
+            {"STX": 100, "MSFT": 200, "AAPL": 500},
+            stock_weights={"STX": 0.01, "MSFT": 0.08, "AAPL": 0.15},
+        )
+        symbols = [r[0] for r in result]
+        self.assertIn("STX", symbols)
+        total = sum(r[3] for r in result)
+        self.assertGreaterEqual(total, Decimal("150"))
+
+    def test_excludes_btc(self) -> None:
+        result = self._call("100", {"BTC": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
+        self.assertNotIn("BTC", [r[0] for r in result])
+
+    def test_excludes_eth(self) -> None:
+        result = self._call("100", {"ETH": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
+        self.assertNotIn("ETH", [r[0] for r in result])
+
+    def test_excludes_gldm(self) -> None:
+        result = self._call("100", {"GLDM": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
+        self.assertNotIn("GLDM", [r[0] for r in result])
+
+    def test_excludes_already_selling(self) -> None:
+        result = self._call(
+            "50", {"AAPL": 100}, already_selling={"AAPL"}, stock_weights={"AAPL": 0.1}
+        )
+        self.assertEqual(result, [])
+
+    def test_excludes_already_buying(self) -> None:
+        result = self._call(
+            "50", {"AAPL": 100}, already_buying={"AAPL"}, stock_weights={"AAPL": 0.1}
+        )
+        self.assertEqual(result, [])
+
+    def test_excludes_today_buys(self) -> None:
+        result = self._call(
+            "50", {"AAPL": 100}, today_buys=frozenset({"AAPL"}), stock_weights={"AAPL": 0.1}
+        )
+        self.assertEqual(result, [])
+
+    def test_caps_sell_amount_at_position_value(self) -> None:
+        result = self._call("500", {"AAPL": 100}, stock_weights={"AAPL": 0.1})
+        self.assertEqual(result[0][3], Decimal("100.00"))
+
+    def test_skips_candidates_below_min_order_dollars(self) -> None:
+        # shortfall $3 < MIN_ORDER_DOLLARS $5 → nothing placed
+        result = self._call("3", {"AAPL": 100}, stock_weights={"AAPL": 0.1})
+        self.assertEqual(result, [])
+
+    def test_returns_empty_when_no_candidates(self) -> None:
+        result = self._call("100", {})
+        self.assertEqual(result, [])
+
+    def test_stops_once_shortfall_covered(self) -> None:
+        # shortfall $50; AAPL ($100) covers it entirely → MSFT not touched
+        result = self._call(
+            "50",
+            {"AAPL": 100, "MSFT": 200},
+            stock_weights={"AAPL": 0.05, "MSFT": 0.10},
+        )
+        # AAPL is lowest weight → sells $50 from AAPL, stops
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "AAPL")
+        self.assertEqual(result[0][3], Decimal("50.00"))
+
+
+# ---------------------------------------------------------------------------
+# Buy priority sort
+# ---------------------------------------------------------------------------
+
+
+class TestSortBuysByPriority(unittest.TestCase):
+    _EQ = InstrumentType.EQUITY
+    _CR = InstrumentType.CRYPTO
+
+    def _order(self, symbol: str, inst_type=None):
+        return (symbol, inst_type or self._EQ, OrderSide.BUY, Decimal("10"))
+
+    def _sort(self, orders, weights=None):
+        from rebalance import _sort_buys_by_priority
+        return _sort_buys_by_priority(
+            orders,
+            stock_weights={k: Decimal(str(v)) for k, v in (weights or {}).items()},
+            alloc_stocks=Decimal("0.75"),
+            investment_base=Decimal("10000"),
+        )
+
+    def test_btc_comes_first(self) -> None:
+        orders = [self._order("AAPL"), self._order("BTC", self._CR)]
+        result = self._sort(orders, {"AAPL": 0.1})
+        self.assertEqual(result[0][0], "BTC")
+
+    def test_eth_comes_after_btc(self) -> None:
+        orders = [
+            self._order("AAPL"),
+            self._order("ETH", self._CR),
+            self._order("BTC", self._CR),
+        ]
+        result = self._sort(orders, {"AAPL": 0.1})
+        symbols = [r[0] for r in result]
+        self.assertLess(symbols.index("BTC"), symbols.index("ETH"))
+        self.assertLess(symbols.index("ETH"), symbols.index("AAPL"))
+
+    def test_gldm_comes_after_eth_before_stocks(self) -> None:
+        orders = [
+            self._order("AAPL"),
+            self._order("GLDM"),
+            self._order("ETH", self._CR),
+        ]
+        result = self._sort(orders, {"AAPL": 0.1})
+        symbols = [r[0] for r in result]
+        self.assertLess(symbols.index("ETH"), symbols.index("GLDM"))
+        self.assertLess(symbols.index("GLDM"), symbols.index("AAPL"))
+
+    def test_stocks_sorted_by_target_value_descending(self) -> None:
+        orders = [
+            self._order("NVDA"),  # weight 0.05 → target $375
+            self._order("AAPL"),  # weight 0.10 → target $750
+            self._order("MSFT"),  # weight 0.15 → target $1125
+        ]
+        result = self._sort(orders, {"NVDA": 0.05, "AAPL": 0.10, "MSFT": 0.15})
+        symbols = [r[0] for r in result]
+        self.assertEqual(symbols, ["MSFT", "AAPL", "NVDA"])
+
+    def test_stock_with_unknown_weight_sorts_last(self) -> None:
+        orders = [self._order("UNKNOWN"), self._order("AAPL")]
+        result = self._sort(orders, {"AAPL": 0.10})
+        symbols = [r[0] for r in result]
+        self.assertLess(symbols.index("AAPL"), symbols.index("UNKNOWN"))
+
+    def test_empty_list_returns_empty(self) -> None:
+        self.assertEqual(self._sort([]), [])
+
+    def test_full_priority_ordering(self) -> None:
+        orders = [
+            self._order("NVDA"),
+            self._order("GLDM"),
+            self._order("AAPL"),
+            self._order("ETH", self._CR),
+            self._order("BTC", self._CR),
+            self._order("MSFT"),
+        ]
+        weights = {"NVDA": 0.05, "AAPL": 0.10, "MSFT": 0.15}
+        result = self._sort(orders, weights)
+        symbols = [r[0] for r in result]
+        self.assertEqual(symbols[:3], ["BTC", "ETH", "GLDM"])
+        # remaining stocks: MSFT > AAPL > NVDA
+        self.assertEqual(symbols[3:], ["MSFT", "AAPL", "NVDA"])
+
+
+# ---------------------------------------------------------------------------
 # Day-trade ledger
 # ---------------------------------------------------------------------------
 

@@ -393,6 +393,7 @@ class TestEstimateMarginState(unittest.TestCase):
         self.assertEqual(loan, Decimal("1500"))
 
 
+
 # ---------------------------------------------------------------------------
 # Buy order budget capping
 # ---------------------------------------------------------------------------
@@ -427,6 +428,76 @@ class TestCapBuyOrders(unittest.TestCase):
 
     def test_buying_power_buffer_is_one_dollar(self) -> None:
         self.assertEqual(BUYING_POWER_BUFFER, Decimal("1.00"))
+
+
+# ---------------------------------------------------------------------------
+# Priority fill buy orders
+# ---------------------------------------------------------------------------
+
+
+class TestFillBuyOrders(unittest.TestCase):
+    _EQ = InstrumentType.EQUITY
+    _CR = InstrumentType.CRYPTO
+
+    def _order(self, symbol: str, amount: str, inst_type=None):
+        return (symbol, inst_type or self._EQ, OrderSide.BUY, Decimal(amount))
+
+    def test_all_orders_fully_filled_when_budget_covers_all(self) -> None:
+        from rebalance import fill_buy_orders
+        orders = [self._order("AAPL", "50"), self._order("MSFT", "30")]
+        result = fill_buy_orders(orders, Decimal("100"))
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][3], Decimal("50"))
+        self.assertEqual(result[1][3], Decimal("30"))
+
+    def test_partial_fill_on_first_order_that_does_not_fit(self) -> None:
+        from rebalance import fill_buy_orders
+        # budget after $1 buffer = $29; AAPL needs $50 → partial at $29
+        orders = [self._order("AAPL", "50"), self._order("MSFT", "10")]
+        result = fill_buy_orders(orders, Decimal("30"))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "AAPL")
+        self.assertEqual(result[0][3], Decimal("29"))
+
+    def test_stops_after_partial_fill_even_if_next_order_fits(self) -> None:
+        # After partial fill remaining < $5; MSFT ($3) would fit but we stop
+        from rebalance import fill_buy_orders
+        orders = [self._order("AAPL", "50"), self._order("MSFT", "3")]
+        # budget = 10 - 1 = 9; AAPL partial at $9; remaining = 0 < $5 → stop
+        result = fill_buy_orders(orders, Decimal("10"))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "AAPL")
+        self.assertEqual(result[0][3], Decimal("9"))
+
+    def test_empty_result_when_buying_power_at_or_below_buffer(self) -> None:
+        from rebalance import fill_buy_orders, BUYING_POWER_BUFFER
+        orders = [self._order("AAPL", "5")]
+        result = fill_buy_orders(orders, BUYING_POWER_BUFFER)
+        self.assertEqual(result, [])
+
+    def test_empty_orders_returns_empty(self) -> None:
+        from rebalance import fill_buy_orders
+        self.assertEqual(fill_buy_orders([], Decimal("1000")), [])
+
+    def test_skips_partial_when_remaining_below_min_order_dollars(self) -> None:
+        from rebalance import fill_buy_orders
+        # budget = 4 + 1(buffer) = 5 total; after buffer: remaining = 4 < $5 min
+        orders = [self._order("AAPL", "50")]
+        result = fill_buy_orders(orders, Decimal("5"))
+        # after buffer $1: remaining = $4, AAPL needs $50, $4 < MIN_ORDER_DOLLARS ($5) → stop
+        self.assertEqual(result, [])
+
+    def test_full_then_partial_sequence(self) -> None:
+        from rebalance import fill_buy_orders
+        # budget = 101 - 1 = 100; BTC $60 full; ETH $50 > $40 remaining but $40 >= $5 → partial $40
+        orders = [
+            self._order("BTC", "60", self._CR),
+            self._order("ETH", "50", self._CR),
+        ]
+        result = fill_buy_orders(orders, Decimal("101"))
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][3], Decimal("60"))
+        self.assertEqual(result[1][3], Decimal("40"))
 
 
 # ---------------------------------------------------------------------------

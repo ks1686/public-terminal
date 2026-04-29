@@ -1416,6 +1416,134 @@ def cap_buy_orders_to_buying_power(
     return selected
 
 
+def fill_buy_orders(
+    orders: list[tuple[str, InstrumentType, OrderSide, Decimal]],
+    available_bp: Decimal,
+) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
+    """
+    Fill buy orders in priority order (caller must pre-sort by tier).
+
+    For each order in sequence:
+    - Full fill if remaining budget >= order amount.
+    - Partial fill (capped to remaining) if remaining >= MIN_ORDER_DOLLARS ($5).
+    - Stop immediately after a partial fill or when remaining < MIN_ORDER_DOLLARS.
+
+    The $1 BUYING_POWER_BUFFER is subtracted before filling begins.
+    """
+    remaining = max(Decimal("0"), available_bp - BUYING_POWER_BUFFER)
+    if remaining <= Decimal("0"):
+        log.warning(
+            "No buy orders will be placed: buying power is only $%.2f.", available_bp
+        )
+        return []
+
+    result: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+    for symbol, inst_type, side, amount in orders:
+        if remaining >= amount:
+            result.append((symbol, inst_type, side, amount))
+            remaining -= amount
+        elif remaining >= MIN_ORDER_DOLLARS:
+            partial = remaining.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+            result.append((symbol, inst_type, side, partial))
+            log.info(
+                "  Partial fill %s $%.2f of $%.2f (buying power limit).",
+                symbol,
+                partial,
+                amount,
+            )
+            break
+        else:
+            break
+
+    total_selected = sum(o[3] for o in result)
+    log.info(
+        "Buy budget: $%.2f available after buffer, $%.2f allocated across %d order(s).",
+        max(Decimal("0"), available_bp - BUYING_POWER_BUFFER),
+        total_selected,
+        len(result),
+    )
+    return result
+
+
+def compute_supplemental_sells(
+    shortfall: Decimal,
+    equity_pos: dict[str, Decimal],
+    already_selling: set[str],
+    already_buying: set[str],
+    today_buys: frozenset[str],
+    stock_weights: dict[str, Decimal],
+    alloc_stocks: Decimal,
+    investment_base: Decimal,
+) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
+    """
+    Build a minimal list of sell orders from the lowest-priority held stock
+    positions to cover a buying-power shortfall after wave-1 sells.
+
+    Candidates are stock equity positions that are not already being sold or
+    bought this run and were not purchased today (day-trade prevention).
+    BTC, ETH, and GLDM are never candidates.
+
+    Candidates are ordered by ascending target value so the least-important
+    positions are sacrificed first. Each sell is sized to the minimum of the
+    held position value and the remaining shortfall.
+    """
+    protected = {BTC_SYMBOL, ETH_SYMBOL, GOLD_SYMBOL}
+    candidates = [
+        symbol
+        for symbol in equity_pos
+        if symbol not in already_selling
+        and symbol not in already_buying
+        and symbol not in today_buys
+        and symbol not in protected
+    ]
+    candidates.sort(
+        key=lambda s: stock_weights.get(s, Decimal("0")) * alloc_stocks * investment_base
+    )
+
+    result: list[tuple[str, InstrumentType, OrderSide, Decimal]] = []
+    remaining = shortfall
+    for symbol in candidates:
+        if remaining <= Decimal("0"):
+            break
+        sell_amount = min(equity_pos[symbol], remaining).quantize(
+            Decimal("0.01"), rounding=ROUND_DOWN
+        )
+        if sell_amount >= MIN_ORDER_DOLLARS:
+            result.append((symbol, InstrumentType.EQUITY, OrderSide.SELL, sell_amount))
+            remaining -= sell_amount
+    return result
+
+
+def _sort_buys_by_priority(
+    buys: list[tuple[str, InstrumentType, OrderSide, Decimal]],
+    stock_weights: dict[str, Decimal],
+    alloc_stocks: Decimal,
+    investment_base: Decimal,
+) -> list[tuple[str, InstrumentType, OrderSide, Decimal]]:
+    """
+    Return buys in fixed priority tier order:
+      Tier 0: BTC
+      Tier 1: ETH
+      Tier 2: GLDM (gold)
+      Tier 3: Stock index positions, sorted by target value descending.
+
+    Within Tier 3, a stock's target value is
+    stock_weights[symbol] * alloc_stocks * investment_base.
+    Stocks with no entry in stock_weights sort last (target = 0).
+    """
+    _TIER: dict[str, int] = {BTC_SYMBOL: 0, ETH_SYMBOL: 1, GOLD_SYMBOL: 2}
+
+    def _key(order: tuple) -> tuple:
+        symbol: str = order[0]
+        tier = _TIER.get(symbol, 3)
+        if tier < 3:
+            return (tier, Decimal("0"))
+        target = stock_weights.get(symbol, Decimal("0")) * alloc_stocks * investment_base
+        return (tier, -target)
+
+    return sorted(buys, key=_key)
+
+
 # ---------------------------------------------------------------------------
 # Delta computation helpers
 # ---------------------------------------------------------------------------

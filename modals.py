@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from public_api_sdk import HistoryRequest, OrderSide, OrderType
+from public_api_sdk import HistoryRequest, OrderSide
 from rich.text import Text
 from textual import on, work
 from textual.binding import Binding

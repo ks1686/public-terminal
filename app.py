@@ -803,10 +803,6 @@ class PublicTerminal(App):
         """Modify an open order."""
         status = self.query_one(StatusBar)
         order_id = modification.get("order_id")
-        symbol = modification.get("symbol")
-        new_quantity = modification.get("new_quantity")
-        new_limit_price = modification.get("new_limit_price")
-        new_stop_price = modification.get("new_stop_price")
         
         try:
             if not self._active_account:

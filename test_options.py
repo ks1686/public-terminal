@@ -4,8 +4,6 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
-import pytest
-
 from options import OptionPosition, _parse_occ_symbol, extract_options_from_positions
 
 

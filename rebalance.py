@@ -371,15 +371,6 @@ def _is_stock_ticker(value: str) -> bool:
     return bool(value) and value.replace(".", "").isalpha()
 
 
-def _coerce_constituents_result(
-    result: tuple[list[str], dict[str, float] | None] | list[str],
-) -> tuple[list[str], dict[str, float] | None]:
-    """Accept the current fetch_constituents tuple and the legacy list shape."""
-    if isinstance(result, tuple) and len(result) == 2:
-        tickers, weights = result
-        return list(tickers), weights
-    return list(result), None
-
 
 def _first_table_column(
     tables: list[pd.DataFrame],
@@ -630,8 +621,13 @@ def _fetch_spus_tickers_official() -> tuple[list[str], dict[str, float]]:
 # --- public fetch functions ---
 
 
-def _load_index_cache(index_id: str) -> tuple[list[str], dict[str, float] | None, datetime] | None:
-    cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
+def _load_index_cache(
+    index_id: str, account_id: str | None = None
+) -> tuple[list[str], dict[str, float] | None, datetime] | None:
+    if account_id:
+        cache_file = get_index_cache_path(account_id, index_id)
+    else:
+        cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
     if cache_file is None or not cache_file.exists():
         return None
     try:
@@ -645,8 +641,13 @@ def _load_index_cache(index_id: str) -> tuple[list[str], dict[str, float] | None
         return None
 
 
-def _save_index_cache(index_id: str, tickers: list[str], weights: dict[str, float] | None) -> None:
-    cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
+def _save_index_cache(
+    index_id: str, tickers: list[str], weights: dict[str, float] | None, account_id: str | None = None
+) -> None:
+    if account_id:
+        cache_file = get_index_cache_path(account_id, index_id)
+    else:
+        cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
     if cache_file is None:
         return
     cache_file.write_text(
@@ -662,7 +663,9 @@ def _save_index_cache(index_id: str, tickers: list[str], weights: dict[str, floa
     log.info("%s constituents cache saved (%d entries).", index_id, len(tickers))
 
 
-def fetch_constituents(index: str) -> tuple[list[str], dict[str, float] | None]:
+def fetch_constituents(
+    index: str, account_id: str | None = None
+) -> tuple[list[str], dict[str, float] | None]:
     """Standardized retrieval: Official -> Wikipedia -> Cache."""
     # 1. Try Official
     try:
@@ -679,7 +682,7 @@ def fetch_constituents(index: str) -> tuple[list[str], dict[str, float] | None]:
         else:
             raise ValueError(f"Unknown index {index}")
 
-        _save_index_cache(index, tickers, weights)
+        _save_index_cache(index, tickers, weights, account_id)
         return tickers, weights
     except Exception as exc:
         log.warning("%s official fetch failed: %s", index, exc)
@@ -696,13 +699,13 @@ def fetch_constituents(index: str) -> tuple[list[str], dict[str, float] | None]:
         else:
             raise RuntimeError(f"No Wikipedia fallback for {index}")
 
-        _save_index_cache(index, tickers, weights)
+        _save_index_cache(index, tickers, weights, account_id)
         return tickers, weights
     except Exception as exc:
         log.warning("%s Wikipedia fallback failed: %s", index, exc)
 
     # 3. Try Stale Cache
-    cached = _load_index_cache(index)
+    cached = _load_index_cache(index, account_id)
     if cached:
         tickers, weights, updated_at = cached
         age = datetime.now() - updated_at
@@ -1812,7 +1815,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             len(public_buyable_symbols),
         )
 
-        constituents, fund_weights = _coerce_constituents_result(fetch_constituents(index))
+        constituents, fund_weights = fetch_constituents(index, resolved_account)
         tradable_constituents = [t for t in constituents if t in public_buyable_symbols]
         log.info(
             "Filtered constituents to %d / %d Public-tradable tickers.",

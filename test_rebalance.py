@@ -922,6 +922,13 @@ class TestParseWeightPct(unittest.TestCase):
 
         self.assertIsNone(_parse_weight_pct("-1.0%"))
 
+    def test_exactly_one_treated_as_one_percent(self) -> None:
+        # 1.0 with no % sign: f >= 1.0 so it is divided by 100 → 0.01 (1%)
+        # This is intentional: bare values >= 1.0 are assumed to be percentage units.
+        from rebalance import _parse_weight_pct
+
+        self.assertAlmostEqual(_parse_weight_pct(1.0), 0.01)
+
 
 class TestNormalizeWeights(unittest.TestCase):
     def test_sums_to_one(self) -> None:
@@ -1084,7 +1091,7 @@ class TestFetchConstituentsFallbacks(unittest.TestCase):
 
         self.assertEqual(tickers, self.tickers)
         self.assertEqual(weights, self.weights)
-        mock_save.assert_called_once_with(self.index, self.tickers, self.weights)
+        mock_save.assert_called_once_with(self.index, self.tickers, self.weights, None)
 
     @patch("rebalance._fetch_sp500_tickers_official")
     @patch("rebalance._fetch_sp500_tickers_wikipedia")
@@ -1098,7 +1105,7 @@ class TestFetchConstituentsFallbacks(unittest.TestCase):
 
         self.assertEqual(tickers, self.tickers)
         self.assertIsNone(weights)
-        mock_save.assert_called_once_with(self.index, self.tickers, None)
+        mock_save.assert_called_once_with(self.index, self.tickers, None, None)
 
     @patch("rebalance._fetch_sp500_tickers_official")
     @patch("rebalance._fetch_sp500_tickers_wikipedia")

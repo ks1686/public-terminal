@@ -598,59 +598,10 @@ def _fetch_vt_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     return tickers, weights
 
 
-# --- public fetch functions ---
-
-
-def _fetch_sp500_tickers() -> tuple[list[str], dict[str, float] | None]:
-    log.info("Fetching S&P 500 constituents (iShares IVV)…")
-    try:
-        tickers, weights = _fetch_sp500_tickers_official()
-        log.info("  → %d constituents%s", len(tickers), " (with fund weights)" if weights else "")
-        return tickers, weights
-    except Exception as exc:
-        log.warning("iShares fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers, weights = _fetch_sp500_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers, weights
-
-
-def _fetch_nasdaq100_tickers() -> tuple[list[str], dict[str, float] | None]:
-    log.info("Fetching NASDAQ-100 constituents (Invesco QQQ)…")
-    try:
-        tickers, weights = _fetch_nasdaq100_tickers_official()
-        log.info("  → %d constituents%s", len(tickers), " (with fund weights)" if weights else "")
-        return tickers, weights
-    except Exception as exc:
-        log.warning("Invesco fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers, weights = _fetch_nasdaq100_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers, weights
-
-
-def _fetch_djia_tickers() -> tuple[list[str], dict[str, float] | None]:
-    log.info("Fetching DJIA constituents (SSGA DIA)…")
-    try:
-        tickers, weights = _fetch_djia_tickers_official()
-        log.info("  → %d constituents%s", len(tickers), " (with fund weights)" if weights else "")
-        return tickers, weights
-    except Exception as exc:
-        log.warning("SSGA fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers, weights = _fetch_djia_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers, weights
-
-
-def _fetch_vt_tickers() -> tuple[list[str], dict[str, float] | None]:
-    log.info("Fetching global equity proxy constituents (iShares ACWI)…")
-    tickers, weights = _fetch_vt_tickers_official()
-    log.info("  → %d US-listed constituents%s", len(tickers), " (with fund weights)" if weights else "")
-    return tickers, weights
-
-
 _SPUS_CSV_URL = (
     "https://www.sp-funds.com/wp-content/uploads/data/TidalFG_Holdings_SPUS.csv"
 )
-_SPUS_BUG_URL = "https://github.com/ks1686/public-terminal/issues"
+_BUG_REPORT_URL = "https://github.com/ks1686/public-terminal/issues"
 
 
 def _fetch_spus_tickers_official() -> tuple[list[str], dict[str, float]]:
@@ -677,61 +628,7 @@ def _fetch_spus_tickers_official() -> tuple[list[str], dict[str, float]]:
     return list(cleaned), _normalize_weights(cleaned)
 
 
-def _load_spus_weights_cache() -> dict[str, float] | None:
-    cache_file = _first_account_path(get_fund_weights_cache_path)
-    if cache_file is None:
-        return None
-    try:
-        data = json.loads(cache_file.read_text())
-        raw = data.get("weights")
-        if not isinstance(raw, dict) or not raw:
-            return None
-        age = datetime.now() - datetime.fromisoformat(data["updated_at"])
-        log.info(
-            "Loaded stale SPUS weights cache (%d entries, %.0f hours old).",
-            len(raw),
-            age.total_seconds() / 3600,
-        )
-        return {str(k): float(v) for k, v in raw.items()}
-    except Exception as exc:
-        log.warning("Could not read SPUS weights cache: %s", exc)
-        return None
-
-
-def _save_spus_weights_cache(weights: dict[str, float]) -> None:
-    cache_file = _first_account_path(get_fund_weights_cache_path)
-    if cache_file is None:
-        return
-    cache_file.write_text(
-        json.dumps(
-            {"updated_at": datetime.now().isoformat(), "weights": weights},
-            indent=2,
-        )
-    )
-    log.info("SPUS weights cache saved (%d entries).", len(weights))
-
-
-def _fetch_spus_tickers() -> tuple[list[str], dict[str, float] | None]:
-    log.info("Fetching SPUS constituents (SP Funds CSV)…")
-    try:
-        tickers, weights = _fetch_spus_tickers_official()
-        log.info("  → %d constituents (with fund weights)", len(tickers))
-        _save_spus_weights_cache(weights)
-        return tickers, weights
-    except Exception as exc:
-        log.warning("SP Funds SPUS fetch failed (%s) — trying stale cache.", exc)
-        cached = _load_spus_weights_cache()
-        if cached:
-            log.warning(
-                "Using stale SPUS holdings from cache. "
-                "Please report this issue at %s",
-                _SPUS_BUG_URL,
-            )
-            return list(cached.keys()), cached
-        raise RuntimeError(
-            f"SPUS holdings fetch failed and no cache is available. "
-            f"Please report this issue at {_SPUS_BUG_URL}"
-        ) from exc
+# --- public fetch functions ---
 
 
 def _load_index_cache(index_id: str) -> tuple[list[str], dict[str, float] | None, datetime] | None:
@@ -767,24 +664,60 @@ def _save_index_cache(index_id: str, tickers: list[str], weights: dict[str, floa
 
 
 def fetch_constituents(index: str) -> tuple[list[str], dict[str, float] | None]:
-    """Return (tickers, fund_weights) for the given index identifier.
+    """Standardized retrieval: Official -> Wikipedia -> Cache."""
+    # 1. Try Official
+    try:
+        if index == _INDEX_SP500:
+            tickers, weights = _fetch_sp500_tickers_official()
+        elif index == _INDEX_NASDAQ100:
+            tickers, weights = _fetch_nasdaq100_tickers_official()
+        elif index == _INDEX_DJIA:
+            tickers, weights = _fetch_djia_tickers_official()
+        elif index == _INDEX_VT:
+            tickers, weights = _fetch_vt_tickers_official()
+        elif index == _INDEX_SPUS:
+            tickers, weights = _fetch_spus_tickers_official()
+        else:
+            raise ValueError(f"Unknown index {index}")
 
-    fund_weights is a {ticker: fraction} dict (values sum to 1.0) when the
-    provider supplies pre-computed weights; None when falling back to Wikipedia
-    (weights will be derived from yfinance market caps instead).
-    """
-    if index == _INDEX_NASDAQ100:
-        return _fetch_nasdaq100_tickers()
-    if index == _INDEX_DJIA:
-        return _fetch_djia_tickers()
-    if index == _INDEX_SP500:
-        return _fetch_sp500_tickers()
-    if index == _INDEX_VT:
-        return _fetch_vt_tickers()
-    if index == _INDEX_SPUS:
-        return _fetch_spus_tickers()
-    raise ValueError(
-        f"Unsupported index '{index}'. Supported values: {', '.join(SUPPORTED_INDEXES)}"
+        _save_index_cache(index, tickers, weights)
+        return tickers, weights
+    except Exception as exc:
+        log.warning("%s official fetch failed: %s", index, exc)
+
+    # 2. Try Wikipedia Fallback
+    try:
+        if index == _INDEX_SP500:
+            tickers, weights = _fetch_sp500_tickers_wikipedia()
+        elif index == _INDEX_NASDAQ100:
+            tickers, weights = _fetch_nasdaq100_tickers_wikipedia()
+        elif index == _INDEX_DJIA:
+            tickers, weights = _fetch_djia_tickers_wikipedia()
+        # ACWI/SPUS don't have Wikipedia lists in current impl
+        else:
+            raise RuntimeError(f"No Wikipedia fallback for {index}")
+
+        _save_index_cache(index, tickers, weights)
+        return tickers, weights
+    except Exception as exc:
+        log.warning("%s Wikipedia fallback failed: %s", index, exc)
+
+    # 3. Try Stale Cache
+    cached = _load_index_cache(index)
+    if cached:
+        tickers, weights, updated_at = cached
+        age = datetime.now() - updated_at
+        log.warning(
+            "USING STALE %s CONSTITUENTS CACHE (%.1f hours old). "
+            "Please report this issue at %s",
+            index,
+            age.total_seconds() / 3600,
+            _BUG_REPORT_URL,
+        )
+        return tickers, weights
+
+    raise RuntimeError(
+        f"Failed to fetch {index} constituents from all sources and no cache available."
     )
 
 

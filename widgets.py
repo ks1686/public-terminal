@@ -464,8 +464,50 @@ class HoldingsTable(DataTable):
                 continue
 
 
+class OptionsTable(DataTable):
+    DEFAULT_CSS = "OptionsTable { height: 1fr; }"
+
+    def on_mount(self) -> None:
+        self.add_columns("CONTRACT", "TYPE", "STRIKE", "EXPIRY", "QTY", "VALUE", "DAY GAIN")
+        self.cursor_type = "row"
+
+    def refresh_from_cache(self, rows: list[dict]) -> None:
+        self.clear()
+        for r in sorted(rows, key=_holding_value_sort_key, reverse=True):
+            try:
+                gain = r.get("gain", "—")
+                gain_style = (
+                    "green"
+                    if r.get("gain_positive")
+                    else ("dim" if gain == "—" else "red")
+                )
+                
+                days_to_expiry = r.get("days_to_expiry", 0)
+                expiry_str = r.get("expiry", "—")
+                expiry_style = "dim"
+                if days_to_expiry and days_to_expiry <= 7 and days_to_expiry >= 0:
+                    expiry_style = "yellow bold"  # Near expiry warning
+                
+                self.add_row(
+                    Text(r.get("symbol_display", "?"), style="bold magenta"),
+                    Text(r.get("type", "?"), style="cyan"),
+                    r.get("strike", "—"),
+                    Text(expiry_str, style=expiry_style),
+                    r.get("qty", "—"),
+                    Text(r.get("value", "—"), style="bold"),
+                    Text(gain, style=gain_style),
+                )
+            except Exception:
+                continue
+
+
+
 class OrdersTable(DataTable):
     DEFAULT_CSS = "OrdersTable { height: 1fr; }"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._order_details: dict[str, dict] = {}  # Store full order details by order_id
 
     def on_mount(self) -> None:
         self.add_columns("SIDE", "SYMBOL", "QTY", "TYPE", "STATUS")
@@ -473,6 +515,7 @@ class OrdersTable(DataTable):
 
     def refresh_from_cache(self, rows: list[dict]) -> None:
         self.clear()
+        self._order_details.clear()
         for r in rows:
             try:
                 order_id = r.get("order_id")
@@ -487,11 +530,14 @@ class OrdersTable(DataTable):
                     Text(r.get("status", "—"), style="yellow"),
                     key=str(order_id),
                 )
+                # Store full details
+                self._order_details[str(order_id)] = r
             except Exception:
                 continue
 
     def refresh_from_orders(self, orders) -> None:
         self.clear()
+        self._order_details.clear()
         for order in orders:
             if order.status not in _ACTIVE_ORDER_STATUSES:
                 continue
@@ -509,6 +555,18 @@ class OrdersTable(DataTable):
                 Text(status, style="yellow"),
                 key=order.order_id,
             )
+            # Store full details from order object
+            order_details = {
+                "order_id": order.order_id,
+                "symbol": sym,
+                "side": side,
+                "qty": str(order.quantity),
+                "type": typ,
+                "status": status,
+                "limit_price": str(order.limit_price) if order.limit_price else None,
+                "stop_price": str(order.stop_price) if order.stop_price else None,
+            }
+            self._order_details[order.order_id] = order_details
 
     def get_selected_order_id(self) -> tuple[str, str] | None:
         """Return (order_id, symbol) for the highlighted row, or None."""
@@ -518,6 +576,15 @@ class OrdersTable(DataTable):
         symbol = str(row_data[1])
         order_id = str(list(self.rows.keys())[self.cursor_row].value)
         return order_id, symbol
+
+    def get_selected_order_details(self) -> dict | None:
+        """Return full details for the highlighted order, or None."""
+        result = self.get_selected_order_id()
+        if not result:
+            return None
+        order_id, _ = result
+        return self._order_details.get(order_id)
+
 
 
 class StatusBar(Static):

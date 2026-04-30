@@ -44,14 +44,17 @@ from modals import (
     AccountManagementModal,
     CancelConfirmModal,
     HistoryModal,
+    OrderDetailsModal,
     OrderModal,
     RebalanceConfigModal,
     RebalanceNowConfirmModal,
     SetupModal,
 )
+from options import extract_options_from_positions
 from widgets import (
     BalanceBar,
     HoldingsTable,
+    OptionsTable,
     OrdersTable,
     PortfolioChart,
     RebalancerBar,
@@ -76,6 +79,7 @@ class PublicTerminal(App):
     #left-pane  { width: 2fr; border: tall $primary; }
     #right-pane { width: 1fr; border: tall $accent; }
     #pane-title    { background: $primary; color: $text; text-align: center; height: 1; text-style: bold; }
+    #options-title { background: $primary; color: $text; text-align: center; height: 1; text-style: bold; }
     #orders-title  { background: $accent;  color: $text; text-align: center; height: 1; text-style: bold; }
     """
 
@@ -84,6 +88,7 @@ class PublicTerminal(App):
         Binding("r", "refresh", "Refresh"),
         Binding("b", "buy", "Buy"),
         Binding("s", "sell", "Sell"),
+        Binding("v", "view_order", "View Order"),
         Binding("c", "cancel_order", "Cancel Order"),
         Binding("h", "history", "History"),
         Binding("l", "toggle_live_chart", "Live Chart"),
@@ -123,6 +128,8 @@ class PublicTerminal(App):
             with Vertical(id="left-pane"):
                 yield Label(" HOLDINGS", id="pane-title")
                 yield HoldingsTable(id="holdings-table")
+                yield Label(" OPTIONS", id="options-title")
+                yield OptionsTable(id="options-table")
             with Vertical(id="right-pane"):
                 yield Label(" OPEN ORDERS", id="orders-title")
                 yield OrdersTable(id="orders-table")
@@ -248,6 +255,9 @@ class PublicTerminal(App):
         holdings = data.get("holdings", [])
         if holdings:
             self.query_one(HoldingsTable).refresh_from_cache(holdings)
+        options = data.get("options", [])
+        if options:
+            self.query_one(OptionsTable).refresh_from_cache(options)
         orders = data.get("orders", [])
         self.query_one(OrdersTable).refresh_from_cache(orders)
         positions = data.get("positions", [])
@@ -264,6 +274,7 @@ class PublicTerminal(App):
         holdings: list[dict],
         orders: list[dict],
         positions: list[dict],
+        options: list[dict] | None = None,
     ) -> None:
         from config import get_portfolio_cache_path
         path = get_portfolio_cache_path(account_id)
@@ -277,6 +288,7 @@ class PublicTerminal(App):
                         "holdings": holdings,
                         "orders": orders,
                         "positions": positions,
+                        "options": options or [],
                     }
                 )
             )
@@ -494,7 +506,11 @@ class PublicTerminal(App):
                 "margin_capacity": str(margin_capacity),
             }
             holdings_data: list[dict] = []
+            options_data: list[dict] = []
             for pos in portfolio.positions:
+                # Skip options; process them separately
+                if pos.instrument.type.value == "OPTION":
+                    continue
                 current_value = pos.current_value or Decimal(0)
                 price = (
                     f"${pos.last_price.last_price:,.2f}"
@@ -523,6 +539,39 @@ class PublicTerminal(App):
                         "gain_positive": gain_positive,
                     }
                 )
+            
+            # Extract options positions
+            option_positions = extract_options_from_positions(portfolio.positions)
+            for opt in option_positions:
+                current_value = opt.current_value or Decimal(0)
+                last_price_str = f"${opt.last_price:,.2f}" if opt.last_price else "—"
+                value_str = f"${current_value:,.2f}" if current_value else "—"
+                
+                gain_pct = opt.position_daily_gain_pct
+                if gain_pct is not None:
+                    pct = float(gain_pct)
+                    gain_str = f"{'+' if pct >= 0 else ''}{pct:.2f}%"
+                    gain_positive = pct >= 0
+                else:
+                    gain_str, gain_positive = "—", False
+                
+                options_data.append(
+                    {
+                        "symbol_display": opt.symbol_display,
+                        "underlying": opt.underlying_symbol,
+                        "type": opt.option_type,
+                        "strike": str(opt.strike_price),
+                        "expiry": opt.expiration_date,
+                        "qty": str(opt.quantity),
+                        "price": last_price_str,
+                        "value": value_str,
+                        "value_num": float(current_value),
+                        "gain": gain_str,
+                        "gain_positive": gain_positive,
+                        "days_to_expiry": opt.days_to_expiry,
+                    }
+                )
+            
             orders_data: list[dict] = []
             for order in portfolio.orders:
                 if order.status not in _ACTIVE_ORDER_STATUSES:
@@ -541,7 +590,7 @@ class PublicTerminal(App):
             positions_data = [
                 {"symbol": pos.instrument.symbol, "qty": float(pos.quantity)}
                 for pos in portfolio.positions
-                if pos.quantity
+                if pos.quantity and pos.instrument.type.value != "OPTION"
             ]
             self._save_portfolio_cache(
                 self._active_account,
@@ -549,6 +598,7 @@ class PublicTerminal(App):
                 holdings_data,
                 orders_data,
                 positions_data,
+                options_data,
             )
 
             self.call_from_thread(
@@ -562,6 +612,9 @@ class PublicTerminal(App):
             )
             self.call_from_thread(
                 self.query_one(HoldingsTable).refresh_from_cache, holdings_data
+            )
+            self.call_from_thread(
+                self.query_one(OptionsTable).refresh_from_cache, options_data
             )
             self.call_from_thread(
                 self.query_one(PortfolioChart).set_positions, portfolio.positions
@@ -628,6 +681,9 @@ class PublicTerminal(App):
             instrument_type=InstrumentType(result["instrument_type"]),
             quantity=result["quantity"],
             side=result["side"],
+            order_type=result.get("order_type", "MARKET"),
+            limit_price=result.get("limit_price"),
+            stop_price=result.get("stop_price"),
         )
 
     @work(thread=True)
@@ -637,29 +693,135 @@ class PublicTerminal(App):
         instrument_type: InstrumentType,
         quantity: Decimal,
         side: OrderSide,
+        order_type: str = "MARKET",
+        limit_price: Decimal | None = None,
+        stop_price: Decimal | None = None,
     ) -> None:
         status = self.query_one(StatusBar)
         try:
             client = self._get_client()
             validate_order_instrument(client, symbol, instrument_type, side)
+            
+            # Map order type string to OrderType enum
+            ot = OrderType.MARKET
+            if order_type == "LIMIT":
+                ot = OrderType.LIMIT
+            elif order_type == "STOP":
+                ot = OrderType.STOP
+            elif order_type == "STOP_LIMIT":
+                ot = OrderType.STOP_LIMIT
+            
+            # Build order request with type-specific fields
             request = OrderRequest(
                 order_id=str(uuid.uuid4()),
                 instrument=OrderInstrument(symbol=symbol, type=instrument_type),
                 order_side=side,
-                order_type=OrderType.MARKET,
+                order_type=ot,
                 expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
                 quantity=quantity,
             )
+            
+            # Add price fields for conditional orders
+            if ot == OrderType.LIMIT and limit_price is not None:
+                request.limit_price = limit_price
+            elif ot == OrderType.STOP and stop_price is not None:
+                request.stop_price = stop_price
+            elif ot == OrderType.STOP_LIMIT and stop_price is not None and limit_price is not None:
+                request.stop_price = stop_price
+                request.limit_price = limit_price
+            
             new_order = client.place_order(request)
+            
+            # Build order type description for status message
+            order_desc = order_type
+            if order_type == "LIMIT" and limit_price:
+                order_desc = f"LIMIT @${limit_price:,.2f}"
+            elif order_type == "STOP" and stop_price:
+                order_desc = f"STOP @${stop_price:,.2f}"
+            elif order_type == "STOP_LIMIT" and stop_price and limit_price:
+                order_desc = f"STOP_LIMIT stop@${stop_price:,.2f}/limit@${limit_price:,.2f}"
+            
             self.call_from_thread(
                 status.set_status,
-                f"  Order submitted: {side.value} {quantity} {symbol} (ID: {new_order.order_id[:8]}…)"
+                f"  Order submitted: {side.value} {quantity} {symbol} ({order_desc}) (ID: {new_order.order_id[:8]}…)"
                 + _HINT,
                 "green",
             )
             self.call_from_thread(self.load_portfolio)
         except Exception as exc:
             self.call_from_thread(status.set_status, f"  Order failed: {exc}", "red")
+
+    def action_view_order(self) -> None:
+        """View and modify details of selected open order."""
+        orders_table = self.query_one(OrdersTable)
+        result = orders_table.get_selected_order_id()
+        if result is None:
+            self.query_one(StatusBar).set_status(
+                "  No open order selected — use arrow keys to select a row in Orders",
+                "yellow",
+            )
+            return
+        order_id, symbol = result
+        
+        # Get full order details from the internal data
+        order_data = orders_table.get_selected_order_details()
+        if not order_data:
+            self.query_one(StatusBar).set_status(
+                "  Could not load order details",
+                "red",
+            )
+            return
+        
+        self.push_screen(
+            OrderDetailsModal(order_data),
+            lambda result: self._handle_order_details_result(result),
+        )
+
+    def _handle_order_details_result(self, result: dict | None) -> None:
+        """Handle result from OrderDetailsModal."""
+        if not result:
+            return
+        
+        action = result.get("action")
+        if action == "cancel":
+            # Show cancel confirmation
+            order_id = result.get("order_id")
+            symbol = result.get("symbol")
+            if order_id and symbol:
+                self.push_screen(
+                    CancelConfirmModal(order_id, symbol),
+                    lambda confirmed: self._handle_cancel_order_result(
+                        confirmed, order_id, symbol
+                    ),
+                )
+        elif action == "modify":
+            # Handle order modification
+            self._do_modify_order(result)
+
+    @work(thread=True)
+    def _do_modify_order(self, modification: dict) -> None:
+        """Modify an open order."""
+        status = self.query_one(StatusBar)
+        order_id = modification.get("order_id")
+        symbol = modification.get("symbol")
+        new_quantity = modification.get("new_quantity")
+        new_limit_price = modification.get("new_limit_price")
+        new_stop_price = modification.get("new_stop_price")
+        
+        try:
+            if not self._active_account:
+                status.set_status("  No account selected", "red")
+                return
+
+            # The Public.com SDK doesn't have a direct order modification endpoint.
+            # Typical flow: cancel the old order and place a new one.
+            status.set_status(
+                f"  To modify order {order_id}, cancel it (press C) and place a new order (press B/S)",
+                "yellow",
+            )
+
+        except Exception as e:
+            status.set_status(f"  Error modifying order: {str(e)}", "red")
 
     def action_cancel_order(self) -> None:
         orders_table = self.query_one(OrdersTable)

@@ -23,7 +23,7 @@ public-terminal = "main:main"
 public-terminal-rebalance = "rebalance:rebalance"
 
 [tool.setuptools]
-py-modules = ["app", "client", "config", "main", "modals", "rebalance", "widgets"]
+py-modules = ["app", "client", "config", "main", "modals", "options", "rebalance", "widgets"]
 
 [dependency-groups]
 dev = [

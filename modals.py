@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from public_api_sdk import HistoryRequest, OrderSide
+from public_api_sdk import HistoryRequest, OrderSide, OrderType
 from rich.text import Text
 from textual import on, work
 from textual.binding import Binding
@@ -18,6 +18,13 @@ from textual.widgets import Button, DataTable, Input, Label, Select, Switch
 INSTRUMENT_OPTIONS = [
     ("Equity / ETF / Stock", "EQUITY"),
     ("Crypto", "CRYPTO"),
+]
+
+ORDER_TYPE_OPTIONS = [
+    ("Market", "MARKET"),
+    ("Limit", "LIMIT"),
+    ("Stop", "STOP"),
+    ("Stop Limit", "STOP_LIMIT"),
 ]
 
 
@@ -162,14 +169,14 @@ class SetupModal(ModalScreen[bool]):
 
 
 class OrderModal(ModalScreen[dict | None]):
-    """Modal for entering a market buy or sell order."""
+    """Modal for entering buy or sell orders with support for MARKET, LIMIT, STOP, and STOP_LIMIT orders."""
 
     DEFAULT_CSS = """
     OrderModal {
         align: center middle;
     }
     #dialog {
-        width: 60;
+        width: 68;
         height: auto;
         border: thick $primary;
         background: $surface;
@@ -185,6 +192,15 @@ class OrderModal(ModalScreen[dict | None]):
         height: 1;
         margin-top: 1;
         color: $text-muted;
+    }
+    .price-field {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+        display: none;
+    }
+    .price-field.visible {
+        display: block;
     }
     #order-error {
         height: 1;
@@ -206,7 +222,7 @@ class OrderModal(ModalScreen[dict | None]):
         self._side = side
 
     def compose(self):
-        title = f"MARKET {self._side.value}"
+        title = f"PLACE {self._side.value} ORDER"
         with Grid(id="dialog"):
             yield Label(title, id="dialog-title")
             yield Label("Symbol", classes="field-label")
@@ -217,6 +233,16 @@ class OrderModal(ModalScreen[dict | None]):
                 value="EQUITY",
                 id="select-type",
             )
+            yield Label("Order type", classes="field-label")
+            yield Select(
+                [(label, val) for label, val in ORDER_TYPE_OPTIONS],
+                value="MARKET",
+                id="select-order-type",
+            )
+            yield Label("Limit price (for LIMIT and STOP_LIMIT orders)", classes="field-label price-field" , id="label-limit-price")
+            yield Input(placeholder="e.g. 150.50", id="input-limit-price")
+            yield Label("Stop price (for STOP and STOP_LIMIT orders)", classes="field-label price-field", id="label-stop-price")
+            yield Input(placeholder="e.g. 145.00", id="input-stop-price")
             yield Label("Quantity (shares / units)", classes="field-label")
             yield Input(placeholder="e.g. 10 or 0.5", id="input-qty")
             yield Label("", id="order-error")
@@ -228,6 +254,46 @@ class OrderModal(ModalScreen[dict | None]):
                 )
                 yield Button("Cancel", variant="default", id="btn-cancel")
 
+    def on_mount(self) -> None:
+        """Set up event handlers and initial state."""
+        order_type_select = self.query_one("#select-order-type", Select)
+        order_type_select.focus()
+        self._update_price_fields()
+
+    @on(Select.Changed, "#select-order-type")
+    def on_order_type_changed(self) -> None:
+        """Update visible price fields based on selected order type."""
+        self._update_price_fields()
+
+    def _update_price_fields(self) -> None:
+        """Show/hide price input fields based on order type."""
+        order_type = self.query_one("#select-order-type", Select).value
+        
+        limit_price_label = self.query_one("#label-limit-price", Label)
+        limit_price_input = self.query_one("#input-limit-price", Input)
+        stop_price_label = self.query_one("#label-stop-price", Label)
+        stop_price_input = self.query_one("#input-stop-price", Input)
+        
+        # Reset visibility
+        for widget in [limit_price_label, limit_price_input, stop_price_label, stop_price_input]:
+            widget.styles.display = "none"
+        
+        # Show appropriate fields based on order type
+        if order_type == "LIMIT":
+            limit_price_label.styles.display = "block"
+            limit_price_input.styles.display = "block"
+            limit_price_input.focus()
+        elif order_type == "STOP":
+            stop_price_label.styles.display = "block"
+            stop_price_input.styles.display = "block"
+            stop_price_input.focus()
+        elif order_type == "STOP_LIMIT":
+            limit_price_label.styles.display = "block"
+            limit_price_input.styles.display = "block"
+            stop_price_label.styles.display = "block"
+            stop_price_input.styles.display = "block"
+            stop_price_input.focus()
+
     @on(Button.Pressed, "#btn-cancel")
     def cancel(self) -> None:
         self.dismiss(None)
@@ -236,29 +302,69 @@ class OrderModal(ModalScreen[dict | None]):
     def confirm(self) -> None:
         symbol = self.query_one("#input-symbol", Input).value.strip().upper()
         instrument_type_val = self.query_one("#select-type", Select).value
+        order_type_val = self.query_one("#select-order-type", Select).value
         qty_str = self.query_one("#input-qty", Input).value.strip()
+        limit_price_str = self.query_one("#input-limit-price", Input).value.strip()
+        stop_price_str = self.query_one("#input-stop-price", Input).value.strip()
 
+        error_label = self.query_one("#order-error", Label)
+        
         if not symbol:
-            self.query_one("#order-error", Label).update("Symbol is required.")
+            error_label.update("Symbol is required.")
             self.query_one("#input-symbol", Input).focus()
             return
+        
         try:
             qty = Decimal(qty_str)
             if qty <= 0:
                 raise ValueError
         except (InvalidOperation, ValueError):
-            self.query_one("#order-error", Label).update(
-                "Quantity must be a positive number."
-            )
+            error_label.update("Quantity must be a positive number.")
             self.query_one("#input-qty", Input).focus()
             return
-        self.query_one("#order-error", Label).update("")
+        
+        limit_price: Decimal | None = None
+        stop_price: Decimal | None = None
+        
+        # Validate order type-specific fields
+        if order_type_val in ("LIMIT", "STOP_LIMIT"):
+            if not limit_price_str:
+                error_label.update("Limit price is required for this order type.")
+                self.query_one("#input-limit-price", Input).focus()
+                return
+            try:
+                limit_price = Decimal(limit_price_str)
+                if limit_price <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                error_label.update("Limit price must be a positive number.")
+                self.query_one("#input-limit-price", Input).focus()
+                return
+        
+        if order_type_val in ("STOP", "STOP_LIMIT"):
+            if not stop_price_str:
+                error_label.update("Stop price is required for this order type.")
+                self.query_one("#input-stop-price", Input).focus()
+                return
+            try:
+                stop_price = Decimal(stop_price_str)
+                if stop_price <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                error_label.update("Stop price must be a positive number.")
+                self.query_one("#input-stop-price", Input).focus()
+                return
+        
+        error_label.update("")
 
         self.dismiss(
             {
                 "symbol": symbol,
                 "instrument_type": instrument_type_val,
+                "order_type": order_type_val,
                 "quantity": qty,
+                "limit_price": limit_price,
+                "stop_price": stop_price,
                 "side": self._side,
             }
         )
@@ -318,6 +424,218 @@ class CancelConfirmModal(ModalScreen[bool]):
     @on(Button.Pressed, "#btn-no")
     def no(self) -> None:
         self.dismiss(False)
+
+
+class OrderDetailsModal(ModalScreen[dict | None]):
+    """Modal for viewing and modifying open orders."""
+
+    DEFAULT_CSS = """
+    OrderDetailsModal {
+        align: center middle;
+    }
+    #order-details-dialog {
+        width: 72;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #order-details-title {
+        text-align: center;
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    .detail-row {
+        height: 1;
+        margin-bottom: 1;
+    }
+    .detail-label {
+        width: 20;
+        color: $text-muted;
+    }
+    .detail-value {
+        color: $text;
+    }
+    .field-label {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    .price-field {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+        display: none;
+    }
+    .price-field.visible {
+        display: block;
+    }
+    #order-details-error {
+        height: 1;
+        margin-top: 1;
+        color: $error;
+    }
+    #btn-row {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+    #btn-modify {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, order_data: dict) -> None:
+        super().__init__()
+        self._order_data = order_data
+        self._modifying = False
+
+    def compose(self):
+        with Grid(id="order-details-dialog"):
+            yield Label("ORDER DETAILS", id="order-details-title")
+            
+            # Display order info
+            symbol = self._order_data.get("symbol", "?")
+            order_type = self._order_data.get("type", "?")
+            side = self._order_data.get("side", "?")
+            status = self._order_data.get("status", "?")
+            qty = self._order_data.get("qty", "?")
+            
+            yield Label(f"Symbol: {symbol}  |  Type: {order_type}  |  Side: {side}  |  Status: {status}")
+            yield Label(f"Quantity: {qty}")
+            
+            # Show current limit/stop prices if applicable
+            limit_price = self._order_data.get("limit_price")
+            stop_price = self._order_data.get("stop_price")
+            if limit_price:
+                yield Label(f"Limit Price: ${limit_price}")
+            if stop_price:
+                yield Label(f"Stop Price: ${stop_price}")
+            
+            # Modification fields (hidden initially)
+            yield Label("New quantity (leave blank to keep current)", classes="field-label", id="label-new-qty")
+            yield Input(placeholder="e.g. 10 or 0.5", id="input-new-qty")
+            
+            yield Label("New limit price (for LIMIT and STOP_LIMIT orders)", classes="field-label price-field", id="label-new-limit")
+            yield Input(placeholder="e.g. 150.50", id="input-new-limit")
+            
+            yield Label("New stop price (for STOP and STOP_LIMIT orders)", classes="field-label price-field", id="label-new-stop")
+            yield Input(placeholder="e.g. 145.00", id="input-new-stop")
+            
+            yield Label("", id="order-details-error")
+            
+            with Horizontal(id="btn-row"):
+                yield Button("Modify", variant="warning", id="btn-modify")
+                yield Button("Cancel Order", variant="error", id="btn-cancel-order")
+                yield Button("Close", variant="default", id="btn-close")
+
+    def on_mount(self) -> None:
+        """Set up initial state."""
+        order_type = self._order_data.get("type", "MARKET")
+        self._update_visible_fields(order_type)
+        self.query_one("#btn-modify", Button).focus()
+
+    def _update_visible_fields(self, order_type: str) -> None:
+        """Show/hide price input fields based on order type."""
+        new_limit_label = self.query_one("#label-new-limit", Label)
+        new_limit_input = self.query_one("#input-new-limit", Input)
+        new_stop_label = self.query_one("#label-new-stop", Label)
+        new_stop_input = self.query_one("#input-new-stop", Input)
+        
+        # Reset visibility
+        for widget in [new_limit_label, new_limit_input, new_stop_label, new_stop_input]:
+            widget.styles.display = "none"
+        
+        # Show appropriate fields based on order type
+        if order_type == "LIMIT":
+            new_limit_label.styles.display = "block"
+            new_limit_input.styles.display = "block"
+        elif order_type == "STOP":
+            new_stop_label.styles.display = "block"
+            new_stop_input.styles.display = "block"
+        elif order_type == "STOP_LIMIT":
+            new_limit_label.styles.display = "block"
+            new_limit_input.styles.display = "block"
+            new_stop_label.styles.display = "block"
+            new_stop_input.styles.display = "block"
+
+    @on(Button.Pressed, "#btn-close")
+    def close(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#btn-cancel-order")
+    def cancel_order(self) -> None:
+        self.dismiss(
+            {
+                "action": "cancel",
+                "order_id": self._order_data.get("order_id"),
+                "symbol": self._order_data.get("symbol"),
+            }
+        )
+
+    @on(Button.Pressed, "#btn-modify")
+    def modify(self) -> None:
+        new_qty_str = self.query_one("#input-new-qty", Input).value.strip()
+        new_limit_str = self.query_one("#input-new-limit", Input).value.strip()
+        new_stop_str = self.query_one("#input-new-stop", Input).value.strip()
+        
+        error_label = self.query_one("#order-details-error", Label)
+        
+        # At least one field must be modified
+        if not new_qty_str and not new_limit_str and not new_stop_str:
+            error_label.update("Enter at least one value to modify.")
+            return
+        
+        # Validate quantity if provided
+        new_qty: Decimal | None = None
+        if new_qty_str:
+            try:
+                new_qty = Decimal(new_qty_str)
+                if new_qty <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                error_label.update("Quantity must be a positive number.")
+                self.query_one("#input-new-qty", Input).focus()
+                return
+        
+        # Validate prices if provided
+        new_limit_price: Decimal | None = None
+        new_stop_price: Decimal | None = None
+        order_type = self._order_data.get("type", "MARKET")
+        
+        if order_type in ("LIMIT", "STOP_LIMIT") and new_limit_str:
+            try:
+                new_limit_price = Decimal(new_limit_str)
+                if new_limit_price <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                error_label.update("Limit price must be a positive number.")
+                self.query_one("#input-new-limit", Input).focus()
+                return
+        
+        if order_type in ("STOP", "STOP_LIMIT") and new_stop_str:
+            try:
+                new_stop_price = Decimal(new_stop_str)
+                if new_stop_price <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                error_label.update("Stop price must be a positive number.")
+                self.query_one("#input-new-stop", Input).focus()
+                return
+        
+        error_label.update("")
+        
+        self.dismiss(
+            {
+                "action": "modify",
+                "order_id": self._order_data.get("order_id"),
+                "symbol": self._order_data.get("symbol"),
+                "new_quantity": new_qty,
+                "new_limit_price": new_limit_price,
+                "new_stop_price": new_stop_price,
+            }
+        )
 
 
 class RebalanceNowConfirmModal(ModalScreen[bool]):

@@ -16,6 +16,8 @@ from rebalance import (
     MIN_ORDER_DOLLARS,
     BUYING_POWER_BUFFER,
     _clean_tickers,
+    _dedupe_tickers,
+    _normalize_ishares_ticker,
     _is_intraday_margin_error,
     _is_pdt_error,
     _sort_buys_by_priority,
@@ -31,6 +33,7 @@ from rebalance import (
     rank_by_market_cap,
     record_today_buys,
     top_n_by_market_cap,
+    validate_market_cap_coverage,
 )
 
 
@@ -294,6 +297,24 @@ class TestMarketCapRanking(unittest.TestCase):
     def test_compute_stock_weights_raises_on_all_zero_caps(self) -> None:
         with self.assertRaises(RuntimeError):
             compute_stock_weights(["A"], {"A": 0.0})
+
+    def test_market_cap_coverage_accepts_complete_enough_data(self) -> None:
+        tickers = [f"T{i}" for i in range(100)]
+        caps = {ticker: float(i + 1) for i, ticker in enumerate(tickers[:95])}
+
+        self.assertTrue(validate_market_cap_coverage(tickers, caps, 50))
+
+    def test_market_cap_coverage_rejects_partial_data_below_threshold(self) -> None:
+        tickers = [f"T{i}" for i in range(100)]
+        caps = {ticker: float(i + 1) for i, ticker in enumerate(tickers[:75])}
+
+        self.assertFalse(validate_market_cap_coverage(tickers, caps, 50))
+
+    def test_market_cap_coverage_rejects_when_top_n_cannot_be_filled(self) -> None:
+        tickers = [f"T{i}" for i in range(100)]
+        caps = {ticker: float(i + 1) for i, ticker in enumerate(tickers[:95])}
+
+        self.assertFalse(validate_market_cap_coverage(tickers, caps, 100))
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +782,12 @@ class TestCleanTickers(unittest.TestCase):
     def test_preserves_order(self) -> None:
         tickers = ["MSFT", "AAPL", "NVDA"]
         self.assertEqual(_clean_tickers(tickers), tickers)
+
+    def test_dedupe_tickers_preserves_first_seen_order(self) -> None:
+        self.assertEqual(_dedupe_tickers(["AAPL", "MSFT", "AAPL"]), ["AAPL", "MSFT"])
+
+    def test_normalize_ishares_ticker_maps_berkshire_class_b(self) -> None:
+        self.assertEqual(_normalize_ishares_ticker("brkb"), "BRK.B")
 
 
 # ---------------------------------------------------------------------------

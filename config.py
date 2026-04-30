@@ -79,10 +79,6 @@ def get_market_cap_cache_path(account_id: str) -> Path:
     return get_cache_dir(account_id) / "market_caps.json"
 
 
-def get_fund_weights_cache_path(account_id: str) -> Path:
-    return get_cache_dir(account_id) / "fund_weights.json"
-
-
 def _read_schema_version() -> int:
     """Return the current on-disk schema version, or 0 if absent."""
     try:

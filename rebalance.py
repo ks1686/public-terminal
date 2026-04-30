@@ -51,7 +51,6 @@ from config import (
     YF_TO_BROKER_SYMBOLS,
     get_accounts,
     get_cache_dir,
-    get_fund_weights_cache_path,
     get_index_cache_path,
     get_market_cap_cache_path,
     get_rebalance_config_path,

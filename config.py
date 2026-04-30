@@ -58,6 +58,11 @@ def get_portfolio_cache_path(account_id: str) -> Path:
     return get_cache_dir(account_id) / "portfolio_cache.json"
 
 
+def get_index_cache_path(account_id: str, index_id: str) -> Path:
+    """Return path to index-specific cache file, e.g. cache/constituents_SP500.json"""
+    return get_cache_dir(account_id) / f"constituents_{index_id.upper()}.json"
+
+
 def get_rebalance_log_path(account_id: str) -> Path:
     return get_cache_dir(account_id) / "rebalance.log"
 

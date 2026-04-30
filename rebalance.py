@@ -51,6 +51,7 @@ from config import (
     YF_TO_BROKER_SYMBOLS,
     get_accounts,
     get_cache_dir,
+    get_index_cache_path,
     get_market_cap_cache_path,
     get_rebalance_config_path,
     get_rebalance_log_path,
@@ -138,6 +139,7 @@ _INDEX_SP500 = "SP500"
 _INDEX_NASDAQ100 = "NASDAQ100"
 _INDEX_DJIA = "DJIA"
 _INDEX_VT = "FTSE_GLOBAL_ALL_CAP"
+_INDEX_SPUS = "SPUS"
 
 # Legacy ETF ticker → index name (for migrating old configs)
 _ETF_TO_INDEX: dict[str, str] = {
@@ -151,6 +153,7 @@ _ETF_TO_INDEX: dict[str, str] = {
     "ONEQ": _INDEX_NASDAQ100,
     "DIA": _INDEX_DJIA,
     "VT": _INDEX_VT,
+    "SPUS": _INDEX_SPUS,
 }
 
 
@@ -159,6 +162,7 @@ SUPPORTED_INDEXES: dict[str, str] = {
     _INDEX_NASDAQ100: "NASDAQ-100",
     _INDEX_DJIA: "Dow Jones (DJIA)",
     _INDEX_VT: "Global equities (ACWI proxy)",
+    _INDEX_SPUS: "SP Funds SPUS (Shariah)",
 }
 
 
@@ -186,7 +190,7 @@ def load_rebalance_config(
 ) -> tuple[str, int, Decimal, frozenset[str]]:
     """Return (index, top_n, margin_usage_pct, excluded_tickers) from rebalance_config.json.
 
-    index is one of: SP500, NASDAQ100, DJIA, FTSE_GLOBAL_ALL_CAP.
+    index is one of: SP500, NASDAQ100, DJIA, FTSE_GLOBAL_ALL_CAP, SPUS.
     Old configs using etf_ticker (SPY, QQQ, DIA, etc.) are migrated automatically.
 
     margin_usage_pct: 0.0 = cash only, 0.5 = 50% of margin capacity, 1.0 = full margin.
@@ -330,6 +334,44 @@ def _clean_tickers(raw: list) -> list[str]:
     ]
 
 
+def _clean_ticker(value) -> str | None:
+    cleaned = _clean_tickers([value])
+    return cleaned[0] if cleaned else None
+
+
+def _parse_weight_pct(value) -> float | None:
+    """Parse a fund weight that may be '6.25%', '6.25', or 0.0625.
+
+    Values with a literal % sign, or bare numeric values > 1.0, are treated
+    as percentage units (divided by 100). Values <= 1.0 with no % sign are
+    treated as fractions already.
+    """
+    if value is None:
+        return None
+    try:
+        s = str(value).strip()
+        is_pct_str = s.endswith("%")
+        f = float(s.rstrip("%"))
+        if f < 0:
+            return None
+        return f / 100.0 if (is_pct_str or f >= 1.0) else f
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_weights(raw: dict[str, float]) -> dict[str, float]:
+    """Return a copy of raw with values rescaled so they sum to 1.0."""
+    total = sum(raw.values())
+    if total <= 0:
+        return {}
+    return {t: w / total for t, w in raw.items()}
+
+
+def _is_stock_ticker(value: str) -> bool:
+    return bool(value) and value.replace(".", "").isalpha()
+
+
+
 def _first_table_column(
     tables: list[pd.DataFrame],
     candidate_columns: tuple[str, ...],
@@ -351,7 +393,7 @@ def _first_table_column(
 # --- official sources ---
 
 
-def _fetch_sp500_tickers_official() -> list[str]:
+def _fetch_sp500_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     """Fetch S&P 500 constituents from iShares IVV daily holdings CSV.
 
     iShares CSV structure: 9 metadata rows, then a header row, then data.
@@ -365,10 +407,21 @@ def _fetch_sp500_tickers_official() -> list[str]:
     df = pd.read_csv(io.StringIO(content), skiprows=9)
     if "Asset Class" in df.columns:
         df = df[df["Asset Class"].str.contains("Equity", na=False)]
-    return _clean_tickers(df["Ticker"].tolist())
+    tickers = _clean_tickers(df["Ticker"].tolist())
+    weights: dict[str, float] | None = None
+    if "Weight (%)" in df.columns:
+        raw = {
+            ticker: _parse_weight_pct(row["Weight (%)"])
+            for _, row in df.iterrows()
+            if (ticker := _clean_ticker(row.get("Ticker"))) is not None
+        }
+        cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
+        if cleaned:
+            weights = _normalize_weights(cleaned)
+    return tickers, weights
 
 
-def _fetch_nasdaq100_tickers_official() -> list[str]:
+def _fetch_nasdaq100_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     """Fetch NASDAQ-100 constituents from Invesco QQQ holdings JSON API.
 
     The API returns all holdings including index futures (securityTypeCode=IFUT)
@@ -383,17 +436,25 @@ def _fetch_nasdaq100_tickers_official() -> list[str]:
             url, {"Referer": "https://www.invesco.com/qqq-etf/en/about.html"}
         ).decode("utf-8")
     )
-    tickers = [
-        h["ticker"]
+    equity_holdings = [
+        h
         for h in data["holdings"]
         if h.get("ticker")
         and h.get("securityTypeCode") not in ("IFUT", "CASH", "FXFWD")
         and str(h["ticker"]).replace(".", "").isalpha()
     ]
-    return _clean_tickers(tickers)
+    tickers = _clean_tickers([h["ticker"] for h in equity_holdings])
+    raw = {
+        ticker: _parse_weight_pct(h.get("percentageOfTotalNetAssets"))
+        for h in equity_holdings
+        if (ticker := _clean_ticker(h.get("ticker"))) is not None
+    }
+    cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
+    weights: dict[str, float] | None = _normalize_weights(cleaned) if cleaned else None
+    return tickers, weights
 
 
-def _fetch_djia_tickers_official() -> list[str]:
+def _fetch_djia_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     """Fetch DJIA constituents from SSGA DIA daily holdings xlsx.
 
     SSGA xlsx structure: 4 metadata rows, then a header row (Name, Ticker, ...),
@@ -408,13 +469,28 @@ def _fetch_djia_tickers_official() -> list[str]:
         skiprows=4,
         engine="openpyxl",
     )
-    return _clean_tickers(df["Ticker"].tolist())
+    tickers = _clean_tickers(df["Ticker"].tolist())
+    weight_col = next(
+        (c for c in df.columns if str(c).strip().lower() in ("weight", "% weight", "weight (%)")),
+        None,
+    )
+    weights: dict[str, float] | None = None
+    if weight_col:
+        raw = {
+            ticker: _parse_weight_pct(row[weight_col])
+            for _, row in df.iterrows()
+            if (ticker := _clean_ticker(row.get("Ticker"))) is not None
+        }
+        cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
+        if cleaned:
+            weights = _normalize_weights(cleaned)
+    return tickers, weights
 
 
 # --- Wikipedia fallbacks ---
 
 
-def _fetch_sp500_tickers_wikipedia() -> list[str]:
+def _fetch_sp500_tickers_wikipedia() -> tuple[list[str], None]:
     """Scrape the S&P 500 constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for S&P 500 constituents…")
     html = _fetch_bytes(
@@ -432,10 +508,10 @@ def _fetch_sp500_tickers_wikipedia() -> list[str]:
         raise RuntimeError(
             "S&P 500 Wikipedia constituent table contained no usable tickers"
         )
-    return tickers
+    return tickers, None
 
 
-def _fetch_nasdaq100_tickers_wikipedia() -> list[str]:
+def _fetch_nasdaq100_tickers_wikipedia() -> tuple[list[str], None]:
     """Scrape the NASDAQ-100 constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for NASDAQ-100 constituents…")
     html = _fetch_bytes("https://en.wikipedia.org/wiki/Nasdaq-100").decode("utf-8")
@@ -451,10 +527,10 @@ def _fetch_nasdaq100_tickers_wikipedia() -> list[str]:
         raise RuntimeError(
             "NASDAQ-100 Wikipedia constituent table contained no usable tickers"
         )
-    return tickers
+    return tickers, None
 
 
-def _fetch_djia_tickers_wikipedia() -> list[str]:
+def _fetch_djia_tickers_wikipedia() -> tuple[list[str], None]:
     """Scrape the DJIA constituent list from Wikipedia (fallback)."""
     log.info("  Falling back to Wikipedia for DJIA constituents…")
     html = _fetch_bytes(
@@ -472,11 +548,11 @@ def _fetch_djia_tickers_wikipedia() -> list[str]:
                     ]
                 )
                 if len(tickers) >= 20:
-                    return tickers
+                    return tickers, None
     raise RuntimeError("Could not find DJIA constituent table on Wikipedia")
 
 
-def _fetch_vt_tickers_official() -> list[str]:
+def _fetch_vt_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     """Fetch a global equity proxy from iShares MSCI ACWI daily holdings CSV.
 
     iShares CSV: 9 metadata rows, then a header row, then data.
@@ -496,72 +572,154 @@ def _fetch_vt_tickers_official() -> list[str]:
     df = pd.read_csv(io.StringIO(content), skiprows=9)
     if "Asset Class" in df.columns:
         df = df[df["Asset Class"].str.contains("Equity", na=False)]
-    raw = _clean_tickers(df["Ticker"].tolist())
     # Drop numeric/exchange-qualified foreign tickers; keep US-style alphabetic ones
-    return [t for t in raw if t.isalpha() and len(t) <= 5]
+    df = df[df["Ticker"].apply(lambda t: isinstance(t, str) and t.strip().isalpha() and len(t.strip()) <= 5)]
+    tickers = _clean_tickers(df["Ticker"].tolist())
+    weights: dict[str, float] | None = None
+    if "Weight (%)" in df.columns:
+        raw = {
+            ticker: _parse_weight_pct(row["Weight (%)"])
+            for _, row in df.iterrows()
+            if (ticker := _clean_ticker(row.get("Ticker"))) is not None
+        }
+        cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
+        if cleaned:
+            weights = _normalize_weights(cleaned)
+    return tickers, weights
+
+
+_SPUS_CSV_URL = (
+    "https://www.sp-funds.com/wp-content/uploads/data/TidalFG_Holdings_SPUS.csv"
+)
+_BUG_REPORT_URL = "https://github.com/ks1686/public-terminal/issues"
+
+
+def _fetch_spus_tickers_official() -> tuple[list[str], dict[str, float]]:
+    """Fetch SPUS constituents and fund weights from SP Funds daily holdings CSV.
+
+    CSV structure: single header row, then data.
+    Ticker column: StockTicker. Weight column: Weightings (e.g. "14.84%").
+    """
+    content = _fetch_bytes(_SPUS_CSV_URL).decode("utf-8")
+    df = pd.read_csv(io.StringIO(content))
+    if "StockTicker" not in df.columns:
+        raise RuntimeError(
+            f"SPUS CSV missing expected 'StockTicker' column. Columns found: {list(df.columns)}"
+        )
+    raw = {
+        ticker: _parse_weight_pct(row.get("Weightings"))
+        for _, row in df.iterrows()
+        if (ticker := _clean_ticker(row.get("StockTicker"))) is not None
+        and _is_stock_ticker(ticker)
+    }
+    cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
+    if not cleaned:
+        raise RuntimeError("SPUS CSV contained no usable weight data")
+    return list(cleaned), _normalize_weights(cleaned)
 
 
 # --- public fetch functions ---
 
 
-def _fetch_sp500_tickers() -> list[str]:
-    log.info("Fetching S&P 500 constituents (iShares IVV)…")
+def _load_index_cache(
+    index_id: str, account_id: str | None = None
+) -> tuple[list[str], dict[str, float] | None, datetime] | None:
+    if account_id:
+        cache_file = get_index_cache_path(account_id, index_id)
+    else:
+        cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
+    if cache_file is None or not cache_file.exists():
+        return None
     try:
-        tickers = _fetch_sp500_tickers_official()
-        log.info("  → %d constituents", len(tickers))
-        return tickers
+        data = json.loads(cache_file.read_text())
+        tickers = data.get("tickers", [])
+        weights = data.get("weights")
+        updated_at = datetime.fromisoformat(data["updated_at"])
+        return tickers, weights, updated_at
     except Exception as exc:
-        log.warning("iShares fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers = _fetch_sp500_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers
+        log.warning("Could not read %s cache: %s", index_id, exc)
+        return None
 
 
-def _fetch_nasdaq100_tickers() -> list[str]:
-    log.info("Fetching NASDAQ-100 constituents (Invesco QQQ)…")
+def _save_index_cache(
+    index_id: str, tickers: list[str], weights: dict[str, float] | None, account_id: str | None = None
+) -> None:
+    if account_id:
+        cache_file = get_index_cache_path(account_id, index_id)
+    else:
+        cache_file = _first_account_path(lambda aid: get_index_cache_path(aid, index_id))
+    if cache_file is None:
+        return
+    cache_file.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now().isoformat(),
+                "tickers": tickers,
+                "weights": weights,
+            },
+            indent=2,
+        )
+    )
+    log.info("%s constituents cache saved (%d entries).", index_id, len(tickers))
+
+
+def fetch_constituents(
+    index: str, account_id: str | None = None
+) -> tuple[list[str], dict[str, float] | None]:
+    """Standardized retrieval: Official -> Wikipedia -> Cache."""
+    # 1. Try Official
     try:
-        tickers = _fetch_nasdaq100_tickers_official()
-        log.info("  → %d constituents", len(tickers))
-        return tickers
+        if index == _INDEX_SP500:
+            tickers, weights = _fetch_sp500_tickers_official()
+        elif index == _INDEX_NASDAQ100:
+            tickers, weights = _fetch_nasdaq100_tickers_official()
+        elif index == _INDEX_DJIA:
+            tickers, weights = _fetch_djia_tickers_official()
+        elif index == _INDEX_VT:
+            tickers, weights = _fetch_vt_tickers_official()
+        elif index == _INDEX_SPUS:
+            tickers, weights = _fetch_spus_tickers_official()
+        else:
+            raise ValueError(f"Unknown index {index}")
+
+        _save_index_cache(index, tickers, weights, account_id)
+        return tickers, weights
     except Exception as exc:
-        log.warning("Invesco fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers = _fetch_nasdaq100_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers
+        log.warning("%s official fetch failed: %s", index, exc)
 
-
-def _fetch_djia_tickers() -> list[str]:
-    log.info("Fetching DJIA constituents (SSGA DIA)…")
+    # 2. Try Wikipedia Fallback
     try:
-        tickers = _fetch_djia_tickers_official()
-        log.info("  → %d constituents", len(tickers))
-        return tickers
+        if index == _INDEX_SP500:
+            tickers, weights = _fetch_sp500_tickers_wikipedia()
+        elif index == _INDEX_NASDAQ100:
+            tickers, weights = _fetch_nasdaq100_tickers_wikipedia()
+        elif index == _INDEX_DJIA:
+            tickers, weights = _fetch_djia_tickers_wikipedia()
+        # ACWI/SPUS don't have Wikipedia lists in current impl
+        else:
+            raise RuntimeError(f"No Wikipedia fallback for {index}")
+
+        _save_index_cache(index, tickers, weights, account_id)
+        return tickers, weights
     except Exception as exc:
-        log.warning("SSGA fetch failed (%s) — falling back to Wikipedia.", exc)
-        tickers = _fetch_djia_tickers_wikipedia()
-        log.info("  → %d constituents (Wikipedia)", len(tickers))
-        return tickers
+        log.warning("%s Wikipedia fallback failed: %s", index, exc)
 
+    # 3. Try Stale Cache
+    cached = _load_index_cache(index, account_id)
+    if cached:
+        tickers, weights, updated_at = cached
+        age = datetime.now() - updated_at
+        log.warning(
+            "USING STALE %s CONSTITUENTS CACHE (%.1f hours old). "
+            "Please report this issue at %s",
+            index,
+            age.total_seconds() / 3600,
+            _BUG_REPORT_URL,
+        )
+        return tickers, weights
 
-def _fetch_vt_tickers() -> list[str]:
-    log.info("Fetching global equity proxy constituents (iShares ACWI)…")
-    tickers = _fetch_vt_tickers_official()
-    log.info("  → %d US-listed constituents", len(tickers))
-    return tickers
-
-
-def fetch_constituents(index: str) -> list[str]:
-    """Return the constituent list for the given index identifier."""
-    if index == _INDEX_NASDAQ100:
-        return _fetch_nasdaq100_tickers()
-    if index == _INDEX_DJIA:
-        return _fetch_djia_tickers()
-    if index == _INDEX_SP500:
-        return _fetch_sp500_tickers()
-    if index == _INDEX_VT:
-        return _fetch_vt_tickers()
-    raise ValueError(
-        f"Unsupported index '{index}'. Supported values: {', '.join(SUPPORTED_INDEXES)}"
+    raise RuntimeError(
+        f"Failed to fetch {index} constituents from all sources and no cache available."
     )
 
 
@@ -755,14 +913,17 @@ def top_n_by_market_cap(
             n,
         )
         return []
-    log.info(
-        "Top %d stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
-        len(top),
-        top[0],
-        market_caps[top[0]] / 1e12,
-        top[-1],
-        market_caps[top[-1]] / 1e9,
-    )
+    largest, smallest = market_caps[top[0]], market_caps[top[-1]]
+    if largest >= 1e9:
+        log.info(
+            "Top %d stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
+            len(top), top[0], largest / 1e12, top[-1], smallest / 1e9,
+        )
+    else:
+        log.info(
+            "Top %d stocks: largest=%s (%.2f%%), smallest=%s (%.4f%%)",
+            len(top), top[0], largest * 100, top[-1], smallest * 100,
+        )
     return top
 
 
@@ -823,14 +984,17 @@ def select_public_tradable_stocks(
             break
 
     if selected:
-        log.info(
-            "Top %d Public-tradable stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
-            len(selected),
-            selected[0],
-            market_caps[selected[0]] / 1e12,
-            selected[-1],
-            market_caps[selected[-1]] / 1e9,
-        )
+        largest, smallest = market_caps[selected[0]], market_caps[selected[-1]]
+        if largest >= 1e9:
+            log.info(
+                "Top %d Public-tradable stocks: largest=%s ($%.2fT), smallest=%s ($%.2fB)",
+                len(selected), selected[0], largest / 1e12, selected[-1], smallest / 1e9,
+            )
+        else:
+            log.info(
+                "Top %d Public-tradable stocks: largest=%s (%.2f%%), smallest=%s (%.4f%%)",
+                len(selected), selected[0], largest * 100, selected[-1], smallest * 100,
+            )
     if excluded_seen:
         log.info(
             "  Excluded after Public validation (%d): %s",
@@ -1614,7 +1778,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
         alloc_cash * 100,
     )
     log.info(
-        "  Index: %s (%s) — top %d by market cap",
+        "  Index: %s (%s) — top %d",
         index,
         SUPPORTED_INDEXES.get(index, index),
         top_n,
@@ -1651,14 +1815,39 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             len(public_buyable_symbols),
         )
 
-        constituents = fetch_constituents(index)
+        constituents, fund_weights = fetch_constituents(index, resolved_account)
         tradable_constituents = [t for t in constituents if t in public_buyable_symbols]
         log.info(
             "Filtered constituents to %d / %d Public-tradable tickers.",
             len(tradable_constituents),
             len(constituents),
         )
-        market_caps = fetch_market_caps(tradable_constituents, index, market_cap_cache_file)
+        if fund_weights is not None:
+            tradable_weights = {
+                t: fund_weights[t] for t in tradable_constituents if t in fund_weights
+            }
+            total_w = sum(tradable_weights.values())
+            min_weight_coverage = max(1, len(tradable_constituents) // 2)
+            if total_w > 0 and len(tradable_weights) >= min_weight_coverage:
+                market_caps: dict[str, float] = {
+                    t: w / total_w for t, w in tradable_weights.items()
+                }
+                log.info(
+                    "Using fund-provided weights for %d tradable constituents.",
+                    len(market_caps),
+                )
+            else:
+                log.warning(
+                    "Fund weights covered only %d / %d tradable constituents; "
+                    "falling back to yfinance market caps.",
+                    len(tradable_weights),
+                    len(tradable_constituents),
+                )
+                market_caps = fetch_market_caps(
+                    tradable_constituents, index, market_cap_cache_file
+                )
+        else:
+            market_caps = fetch_market_caps(tradable_constituents, index, market_cap_cache_file)
 
         top_stocks = select_public_tradable_stocks(
             client,

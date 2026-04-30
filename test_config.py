@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -173,6 +174,13 @@ class TestAccountCRUD(unittest.TestCase):
             self.assertEqual(p, self.tmp / "accounts" / "ACCT001" / "rebalance_config.json")
             p2 = config.get_portfolio_cache_path("ACCT001")
             self.assertEqual(p2, self.tmp / "accounts" / "ACCT001" / "cache" / "portfolio_cache.json")
+
+    def test_get_index_cache_path(self):
+        import config
+        with _patch_config_paths(self.tmp):
+            path = config.get_index_cache_path("TEST001", "SP500")
+            self.assertIn("constituents_SP500.json", str(path))
+            self.assertIn("TEST001", str(path))
 
 
 if __name__ == "__main__":

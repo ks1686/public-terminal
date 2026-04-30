@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -821,7 +821,9 @@ class TestConstituentPreFiltering(unittest.TestCase):
                 return_value=tradable,
             ),
             patch.object(
-                rebalance_mod, "fetch_constituents", return_value=all_constituents
+                rebalance_mod,
+                "fetch_constituents",
+                return_value=(all_constituents, None),
             ),
             patch.object(
                 rebalance_mod, "fetch_market_caps", side_effect=fake_fetch_market_caps
@@ -887,6 +889,253 @@ class TestConstituentPreFiltering(unittest.TestCase):
             ["ADYEN", "SIKA"], {"AAPL", "MSFT"}
         )
         self.assertEqual(passed, [])
+
+
+class TestParseWeightPct(unittest.TestCase):
+    def test_percent_string(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertAlmostEqual(_parse_weight_pct("14.84%"), 0.1484)
+
+    def test_bare_percent_value(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertAlmostEqual(_parse_weight_pct("6.25"), 0.0625)
+
+    def test_fraction_value(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertAlmostEqual(_parse_weight_pct(0.0625), 0.0625)
+
+    def test_none_returns_none(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertIsNone(_parse_weight_pct(None))
+
+    def test_invalid_string_returns_none(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertIsNone(_parse_weight_pct("N/A"))
+
+    def test_negative_returns_none(self) -> None:
+        from rebalance import _parse_weight_pct
+
+        self.assertIsNone(_parse_weight_pct("-1.0%"))
+
+    def test_exactly_one_treated_as_one_percent(self) -> None:
+        # 1.0 with no % sign: f >= 1.0 so it is divided by 100 → 0.01 (1%)
+        # This is intentional: bare values >= 1.0 are assumed to be percentage units.
+        from rebalance import _parse_weight_pct
+
+        self.assertAlmostEqual(_parse_weight_pct(1.0), 0.01)
+
+
+class TestNormalizeWeights(unittest.TestCase):
+    def test_sums_to_one(self) -> None:
+        from rebalance import _normalize_weights
+
+        result = _normalize_weights({"A": 2.0, "B": 3.0, "C": 5.0})
+        self.assertAlmostEqual(sum(result.values()), 1.0)
+        self.assertAlmostEqual(result["A"], 0.2)
+        self.assertAlmostEqual(result["C"], 0.5)
+
+    def test_empty_total_returns_empty(self) -> None:
+        from rebalance import _normalize_weights
+
+        self.assertEqual(_normalize_weights({"A": 0.0}), {})
+
+
+class TestFetchSpusTickers(unittest.TestCase):
+    def test_official_parser_drops_non_stock_rows(self) -> None:
+        from rebalance import _fetch_spus_tickers_official
+
+        csv = "\n".join(
+            [
+                "Date,Account,StockTicker,CUSIP,SecurityName,Shares,Price,MarketValue,Weightings,NetAssets,SharesOutstanding,CreationUnits",
+                "04/29/2026,SPUS,NVDA,67066G104,NVIDIA Corp,100,10,1000,60.00%,1000,100,1",
+                "04/29/2026,SPUS,AAPL,037833100,Apple Inc,100,10,1000,40.00%,1000,100,1",
+                "04/29/2026,SPUS,Cash&Other,Cash&Other,Cash & Other,100,1,100,0.15%,1000,100,1",
+                "04/29/2026,SPUS,003654100CVR,003654100CVR,ABIOMED INC,0,0,0,0.00%,1000,100,1",
+            ]
+        )
+
+        with patch.object(rebalance_mod, "_fetch_bytes", return_value=csv.encode()):
+            tickers, weights = _fetch_spus_tickers_official()
+
+        self.assertEqual(tickers, ["NVDA", "AAPL"])
+        self.assertAlmostEqual(weights["AAPL"], 0.4)
+
+
+class TestFetchConstituentsSpus(unittest.TestCase):
+    def test_spus_index_dispatches_to_spus_fetcher(self) -> None:
+        from rebalance import fetch_constituents, _INDEX_SPUS
+
+        expected = (["NVDA", "AAPL"], {"NVDA": 0.6, "AAPL": 0.4})
+        with (
+            patch.object(
+                rebalance_mod, "_fetch_spus_tickers_official", return_value=expected
+            ),
+            patch.object(rebalance_mod, "_save_index_cache"),
+        ):
+            result = fetch_constituents(_INDEX_SPUS)
+        self.assertEqual(result, expected)
+
+    def test_spus_in_supported_indexes(self) -> None:
+        from rebalance import SUPPORTED_INDEXES, _INDEX_SPUS
+
+        self.assertIn(_INDEX_SPUS, SUPPORTED_INDEXES)
+        self.assertIn("Shariah", SUPPORTED_INDEXES[_INDEX_SPUS])
+
+
+class TestRebalanceFundWeights(unittest.TestCase):
+    """Verify rebalance() uses fund weights directly and skips fetch_market_caps."""
+
+    def test_fund_weights_bypass_market_cap_fetch(self) -> None:
+        fund_weights = {"NVDA": 0.6, "AAPL": 0.4}
+        all_constituents = list(fund_weights.keys())
+        tradable = set(all_constituents)
+
+        fake_client = SimpleNamespace(
+            get_portfolio=lambda: SimpleNamespace(orders=[]),
+            close=lambda: None,
+        )
+        fetch_market_caps_called = []
+
+        def fake_fetch_market_caps(tickers, index, cache_file=None):
+            fetch_market_caps_called.append(tickers)
+            return {t: float(i + 1) * 1e12 for i, t in enumerate(tickers)}
+
+        with (
+            patch.object(rebalance_mod, "_load_config_json", return_value={}),
+            patch.object(
+                rebalance_mod,
+                "load_rebalance_config",
+                return_value=("SPUS", 10, Decimal("0"), frozenset()),
+            ),
+            patch.object(
+                rebalance_mod,
+                "load_allocation_config",
+                return_value={
+                    "stocks": Decimal("1"),
+                    "btc": Decimal("0"),
+                    "eth": Decimal("0"),
+                    "gold": Decimal("0"),
+                    "cash": Decimal("0"),
+                },
+            ),
+            patch.object(rebalance_mod, "get_accounts", return_value=["TEST001"]),
+            patch.object(rebalance_mod, "get_client", return_value=fake_client),
+            patch.object(
+                rebalance_mod,
+                "get_tradable_instrument_symbols",
+                return_value=tradable,
+            ),
+            patch.object(
+                rebalance_mod,
+                "fetch_constituents",
+                return_value=(all_constituents, fund_weights),
+            ),
+            patch.object(
+                rebalance_mod, "fetch_market_caps", side_effect=fake_fetch_market_caps
+            ),
+            patch.object(
+                rebalance_mod,
+                "select_public_tradable_stocks",
+                side_effect=lambda _client, tickers, _caps, _n, _excl, _buyable=None: [
+                    t for t in tickers if t in tradable
+                ][:3],
+            ),
+            patch.object(
+                rebalance_mod,
+                "get_portfolio_snapshot",
+                return_value=(
+                    Decimal("0"),
+                    Decimal("10000"),
+                    Decimal("10000"),
+                    Decimal("10000"),
+                    {},
+                    {},
+                    {},
+                    {},
+                ),
+            ),
+            patch.object(rebalance_mod, "load_today_buys", return_value=frozenset()),
+            patch.object(
+                rebalance_mod,
+                "filter_orders_by_public_tradability",
+                side_effect=lambda client, orders: orders,
+            ),
+            patch.object(rebalance_mod, "fetch_crypto_price"),
+            patch.object(rebalance_mod, "cancel_open_orders"),
+            patch.object(rebalance_mod, "place_orders", return_value=([], [])),
+            patch.object(rebalance_mod, "record_today_buys"),
+        ):
+            rebalance_mod.rebalance(dry_run=True)
+
+        self.assertEqual(fetch_market_caps_called, [], "fetch_market_caps should not be called when fund weights are available")
+
+
+class TestFetchConstituentsFallbacks(unittest.TestCase):
+    def setUp(self):
+        self.index = "SP500"
+        self.tickers = ["AAPL", "MSFT"]
+        self.weights = {"AAPL": 0.6, "MSFT": 0.4}
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._save_index_cache")
+    def test_official_success(self, mock_save, mock_official):
+        mock_official.return_value = (self.tickers, self.weights)
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertEqual(weights, self.weights)
+        mock_save.assert_called_once_with(self.index, self.tickers, self.weights, None)
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._save_index_cache")
+    def test_wikipedia_fallback_on_official_failure(self, mock_save, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.return_value = (self.tickers, None)
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertIsNone(weights)
+        mock_save.assert_called_once_with(self.index, self.tickers, None, None)
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._load_index_cache")
+    @patch("rebalance._save_index_cache")
+    def test_cache_fallback_on_all_fetch_failure(self, mock_save, mock_load, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.side_effect = Exception("Wiki failed")
+        mock_load.return_value = (self.tickers, self.weights, datetime.now())
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertEqual(weights, self.weights)
+        # Should NOT save to cache if we just loaded FROM cache
+        mock_save.assert_not_called()
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._load_index_cache")
+    def test_runtime_error_if_all_fail(self, mock_load, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.side_effect = Exception("Wiki failed")
+        mock_load.return_value = None
+
+        from rebalance import fetch_constituents
+        with self.assertRaises(RuntimeError) as cm:
+            fetch_constituents(self.index)
+        self.assertIn("Failed to fetch", str(cm.exception))
 
 
 if __name__ == "__main__":

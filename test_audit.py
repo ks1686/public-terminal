@@ -249,7 +249,7 @@ class OrderSafetyTests(unittest.TestCase):
                 "get_tradable_instrument_symbols",
                 return_value={"AAPL"},
             ),
-            patch.object(rebalance_mod, "fetch_constituents", return_value=["AAPL"]),
+            patch.object(rebalance_mod, "fetch_constituents", return_value=(["AAPL"], None)),
             patch.object(
                 rebalance_mod, "fetch_market_caps", return_value={"AAPL": 1_000_000}
             ),

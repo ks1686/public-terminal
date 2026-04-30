@@ -11,7 +11,7 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 - **Manual orders** — **limit, stop, and stop-limit orders** for stocks, ETFs, and crypto (in addition to market orders)
 - **Options tracking** — view open options positions with contract details, expiration dates, and P&L
 - **Portfolio chart** — scrollable price history across all your holdings
-- **Direct index investing** — top N stocks from S&P 500, NASDAQ-100, or DJIA, market-cap weighted, rebalanced daily
+- **Direct index investing** — top N stocks from S&P 500, NASDAQ-100, DJIA, ACWI, or SPUS (Shariah), market-cap weighted, rebalanced daily
 - **Margin support** — optionally deploy a configurable percentage of your margin capacity as additional buying power
 - **Configurable exclusions** — skip specific tickers from rebalancing entirely
 - **PDT protection** — day-trade ledger prevents selling positions opened the same day
@@ -237,6 +237,7 @@ Supported indexes:
 | `NASDAQ100` | NASDAQ-100 |
 | `DJIA` | Dow Jones Industrial Average |
 | `FTSE_GLOBAL_ALL_CAP` | Global equities via an iShares ACWI holdings proxy |
+| `SPUS` | SP Funds S&P 500 Shariah Industry Exclusions ETF |
 
 Legacy ETF values such as `SPY`, `QQQ`, `DIA`, and `VT` are migrated automatically. Arbitrary ETFs are not supported. Settings are saved to `rebalance_config.json` and take effect on the next run.
 

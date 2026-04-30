@@ -7,8 +7,9 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 ## Features
 
 - **Multi-account** — persistent tab bar to switch between accounts; add/remove accounts at runtime
-- **Live portfolio** — holdings, values, quantities, open orders
-- **Manual orders** — market buy and sell for equities, ETFs, and crypto
+- **Live portfolio** — holdings, values, quantities, open orders, **options positions**
+- **Manual orders** — **limit, stop, and stop-limit orders** for stocks, ETFs, and crypto (in addition to market orders)
+- **Options tracking** — view open options positions with contract details, expiration dates, and P&L
 - **Portfolio chart** — scrollable price history across all your holdings
 - **Direct index investing** — top N stocks from S&P 500, NASDAQ-100, or DJIA, market-cap weighted, rebalanced daily
 - **Margin support** — optionally deploy a configurable percentage of your margin capacity as additional buying power
@@ -86,9 +87,12 @@ Account Tabs      — one tab per account; switch with Ctrl+Left / Ctrl+Right
 Balance Bar       — total equity, buying power, options BP, crypto BP, cash or margin balance
 Rebalancer Bar    — timer status, active config, key hint strip
 Portfolio Chart   — scrollable price history
-┌─ PORTFOLIO ──────┐  ┌─ OPEN ORDERS ──────┐
-│ holdings table   │  │ pending orders      │
-└──────────────────┘  └────────────────────┘
+┌─ HOLDINGS ──────────┐  ┌─ OPEN ORDERS ──────┐
+│ stocks, ETFs, crypto │  │ pending orders      │
+├──────────────────────┤  └────────────────────┘
+│ OPTIONS              │
+│ calls, puts          │
+└──────────────────────┘
 Footer (key bindings)
 ```
 
@@ -100,6 +104,7 @@ Footer (key bindings)
 | `l` | Toggle **live portfolio balance stream** on the chart |
 | `b` | Place a market **buy** order |
 | `s` | Place a market **sell** order |
+| `v` | **View / modify** the selected open order |
 | `c` | Cancel the selected open order |
 | `h` | View order history |
 | `[` | Scroll portfolio chart left (earlier) |
@@ -119,13 +124,43 @@ A modal prompts for:
 
 - **Symbol** — e.g. `AAPL`, `BTC`, `GLDM`
 - **Instrument type** — Equity or Crypto
+- **Order type** — Market, Limit, Stop, or Stop Limit
+  - **Market** — immediate execution at current market price
+  - **Limit** — buy/sell at or better than a specified price
+  - **Stop** — trigger a market order when price reaches a stop price
+  - **Stop Limit** — trigger a limit order when price reaches a stop price
 - **Quantity** — shares or coin units (fractional supported)
 
-All orders are market orders, day-only.
+Limit and stop prices are shown conditionally based on the selected order type. All orders are day-only.
 
 ### Cancelling orders (`c`)
 
 Select a row in the Open Orders table, then press `c`. A confirmation modal shows the order details before cancellation.
+
+### Viewing & modifying orders (`v`)
+
+Select a row in the Open Orders table, then press `v` to open the order details modal. The modal displays:
+
+- **Order details** — symbol, order type, side (buy/sell), status, and quantity
+- **Order prices** — current limit price and/or stop price (if applicable)
+- **Modification fields** — edit quantity and/or prices for limit/stop orders (leave blank to keep current value)
+
+The modal allows you to:
+
+- **Cancel the order** — button to proceed with cancellation
+- **Modify the order** — edit quantity or prices and submit changes
+- **Close** — dismiss without making changes
+
+Note: The Public.com API doesn't support direct order modification, so modifying an order requires cancelling the current order and placing a new one with the updated parameters. The modal will guide you through this process.
+
+### Holdings & Options Display
+
+The portfolio view displays:
+
+- **Holdings table** — stocks, ETFs, crypto, bonds with symbol, type, quantity, price, value, and daily P&L
+- **Options table** — options contracts with underlying, type (CALL/PUT), strike, expiration date, quantity, value, and daily P&L
+  - Options expiring within 7 days are highlighted in yellow for quick reference
+  - Sorted by value (largest positions first)
 
 ### Portfolio chart (`[` / `]` / `l`)
 

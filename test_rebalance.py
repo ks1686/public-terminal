@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1066,6 +1066,69 @@ class TestRebalanceFundWeights(unittest.TestCase):
             rebalance_mod.rebalance(dry_run=True)
 
         self.assertEqual(fetch_market_caps_called, [], "fetch_market_caps should not be called when fund weights are available")
+
+
+class TestFetchConstituentsFallbacks(unittest.TestCase):
+    def setUp(self):
+        self.index = "SP500"
+        self.tickers = ["AAPL", "MSFT"]
+        self.weights = {"AAPL": 0.6, "MSFT": 0.4}
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._save_index_cache")
+    def test_official_success(self, mock_save, mock_official):
+        mock_official.return_value = (self.tickers, self.weights)
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertEqual(weights, self.weights)
+        mock_save.assert_called_once_with(self.index, self.tickers, self.weights)
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._save_index_cache")
+    def test_wikipedia_fallback_on_official_failure(self, mock_save, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.return_value = (self.tickers, None)
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertIsNone(weights)
+        mock_save.assert_called_once_with(self.index, self.tickers, None)
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._load_index_cache")
+    @patch("rebalance._save_index_cache")
+    def test_cache_fallback_on_all_fetch_failure(self, mock_save, mock_load, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.side_effect = Exception("Wiki failed")
+        mock_load.return_value = (self.tickers, self.weights, datetime.now())
+
+        from rebalance import fetch_constituents
+        tickers, weights = fetch_constituents(self.index)
+
+        self.assertEqual(tickers, self.tickers)
+        self.assertEqual(weights, self.weights)
+        # Should NOT save to cache if we just loaded FROM cache
+        mock_save.assert_not_called()
+
+    @patch("rebalance._fetch_sp500_tickers_official")
+    @patch("rebalance._fetch_sp500_tickers_wikipedia")
+    @patch("rebalance._load_index_cache")
+    def test_runtime_error_if_all_fail(self, mock_load, mock_wiki, mock_official):
+        mock_official.side_effect = Exception("Official failed")
+        mock_wiki.side_effect = Exception("Wiki failed")
+        mock_load.return_value = None
+
+        from rebalance import fetch_constituents
+        with self.assertRaises(RuntimeError) as cm:
+            fetch_constituents(self.index)
+        self.assertIn("Failed to fetch", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -82,12 +82,16 @@ GOLD_SYMBOL = "GLDM"
 BTC_SYMBOL = "BTC"
 ETH_SYMBOL = "ETH"
 NON_STOCK_ETFS = {GOLD_SYMBOL}  # equity symbols excluded from the stock index slice
+ISHARES_TO_BROKER_SYMBOLS = {
+    "BRKB": "BRK.B",
+}
 
 # ---------------------------------------------------------------------------
 # Operational config
 # ---------------------------------------------------------------------------
 
 MARKET_CAP_CACHE_MAX_AGE_HOURS = 20  # same-day cache; refresh each noon run
+MARKET_CAP_MIN_COVERAGE_PCT = Decimal("0.95")
 MARKET_CAP_FETCH_WORKERS = 20  # parallel threads for fast_info calls
 MARKET_CAP_FETCH_TIMEOUT_SECONDS = (
     300  # hard wall-clock deadline for all workers combined
@@ -371,6 +375,16 @@ def _is_stock_ticker(value: str) -> bool:
     return bool(value) and value.replace(".", "").isalpha()
 
 
+def _normalize_ishares_ticker(ticker: str) -> str:
+    """Normalize iShares holding tickers to Public broker symbols where needed."""
+    clean = ticker.upper().strip()
+    return ISHARES_TO_BROKER_SYMBOLS.get(clean, clean)
+
+
+def _dedupe_tickers(tickers: list[str]) -> list[str]:
+    """Return tickers in original order with duplicates removed."""
+    return list(dict.fromkeys(tickers))
+
 
 def _first_table_column(
     tables: list[pd.DataFrame],
@@ -572,19 +586,10 @@ def _fetch_vt_tickers_official() -> tuple[list[str], dict[str, float] | None]:
     df = pd.read_csv(io.StringIO(content), skiprows=9)
     if "Asset Class" in df.columns:
         df = df[df["Asset Class"].str.contains("Equity", na=False)]
-    # Drop numeric/exchange-qualified foreign tickers; keep US-style alphabetic ones
-    df = df[df["Ticker"].apply(lambda t: isinstance(t, str) and t.strip().isalpha() and len(t.strip()) <= 5)]
-    tickers = _clean_tickers(df["Ticker"].tolist())
-    weights: dict[str, float] | None = None
-    if "Weight (%)" in df.columns:
-        raw = {
-            ticker: _parse_weight_pct(row["Weight (%)"])
-            for _, row in df.iterrows()
-            if (ticker := _clean_ticker(row.get("Ticker"))) is not None
-        }
-        cleaned = {t: w for t, w in raw.items() if w is not None and w > 0}
-        if cleaned:
-            weights = _normalize_weights(cleaned)
+
+    market_values = _extract_vt_market_values(df)
+    tickers = _dedupe_tickers(list(market_values))
+    weights = _normalize_weights(market_values) if market_values else None
     return tickers, weights
 
 
@@ -616,6 +621,50 @@ def _fetch_spus_tickers_official() -> tuple[list[str], dict[str, float]]:
     if not cleaned:
         raise RuntimeError("SPUS CSV contained no usable weight data")
     return list(cleaned), _normalize_weights(cleaned)
+
+
+def _extract_vt_market_values(df: pd.DataFrame) -> dict[str, float]:
+    """Return ACWI holding market values keyed by normalized Public broker symbol."""
+    caps: dict[str, float] = {}
+    for _, row in df.iterrows():
+        raw_ticker = row.get("Ticker")
+        if not isinstance(raw_ticker, str) or not raw_ticker.strip():
+            continue
+        ticker = _normalize_ishares_ticker(raw_ticker)
+        if not (
+            (ticker.isalpha() and len(ticker) <= 5)
+            or ticker in ISHARES_TO_BROKER_SYMBOLS.values()
+        ):
+            continue
+        try:
+            market_value = float(str(row.get("Market Value", "")).replace(",", ""))
+        except ValueError:
+            continue
+        if market_value <= 0:
+            continue
+        # Some non-US listings collide with US symbols. Keep the largest ACWI
+        # holding for that symbol rather than double-counting ambiguous tickers.
+        caps[ticker] = max(caps.get(ticker, 0.0), market_value)
+    return caps
+
+
+def _fetch_vt_market_value_caps_official() -> dict[str, float]:
+    """Return ACWI holding market values keyed by normalized Public broker symbol.
+
+    The ACWI proxy includes many non-US exchange tickers that yfinance cannot
+    resolve reliably at this scale. The official holdings file already includes
+    USD market values and weights, so for this global proxy we use those values
+    directly as the ranking input instead of making hundreds of yfinance calls.
+    """
+    url = (
+        "https://www.ishares.com/us/products/239600/ISHARES-MSCI-ACWI-ETF"
+        "/1467271812596.ajax?fileType=csv&fileName=ACWI_holdings&dataType=fund"
+    )
+    content = _fetch_bytes(url).decode("utf-8")
+    df = pd.read_csv(io.StringIO(content), skiprows=9)
+    if "Asset Class" in df.columns:
+        df = df[df["Asset Class"].str.contains("Equity", na=False)]
+    return _extract_vt_market_values(df)
 
 
 # --- public fetch functions ---
@@ -728,6 +777,40 @@ def fetch_constituents(
 # ---------------------------------------------------------------------------
 
 
+def _market_cap_min_required(source_ticker_count: int) -> int:
+    """Return the minimum market-cap coverage required for a trustworthy basket."""
+    if source_ticker_count <= 0:
+        return 0
+    required = (Decimal(source_ticker_count) * MARKET_CAP_MIN_COVERAGE_PCT).to_integral_value(
+        rounding=ROUND_DOWN
+    )
+    return max(1, int(required))
+
+
+def validate_market_cap_coverage(
+    tickers: list[str],
+    market_caps: dict[str, float],
+    top_n: int,
+) -> bool:
+    """Return True when market-cap data is complete enough to plan a top-N basket."""
+    source_count = len(tickers)
+    available_count = len([ticker for ticker in tickers if ticker in market_caps])
+    min_required = _market_cap_min_required(source_count)
+    desired_positions = min(top_n, source_count)
+    if available_count < min_required or available_count < desired_positions:
+        log.error(
+            "Market cap coverage too low for reliable top-%d selection: %d / %d "
+            "available (coverage threshold: %d, desired positions: %d).",
+            top_n,
+            available_count,
+            source_count,
+            min_required,
+            desired_positions,
+        )
+        return False
+    return True
+
+
 def _load_market_cap_cache(
     index: str, market_cap_cache_file: Path | None = None
 ) -> dict[str, float] | None:
@@ -748,7 +831,7 @@ def _load_market_cap_cache(
         if not isinstance(source_ticker_count, int) or source_ticker_count < 1:
             log.info("Market cap cache missing coverage metadata — discarding.")
             return None
-        min_required = max(1, source_ticker_count // 2)
+        min_required = _market_cap_min_required(source_ticker_count)
         if len(raw_caps) < min_required:
             log.info(
                 "Market cap cache coverage too low (%d/%d, threshold: %d) — discarding.",
@@ -840,6 +923,23 @@ def fetch_market_caps(
     if cached is not None:
         return cached
 
+    if index == _INDEX_VT:
+        log.info("Loading ACWI holding market values from iShares…")
+        all_caps = _fetch_vt_market_value_caps_official()
+        caps = {ticker: all_caps[ticker] for ticker in tickers if ticker in all_caps}
+        log.info("  → ACWI market values for %d / %d tickers", len(caps), len(tickers))
+        min_required = _market_cap_min_required(len(tickers))
+        if len(caps) >= min_required:
+            _save_market_cap_cache(caps, index, len(tickers), market_cap_cache_file)
+        else:
+            log.warning(
+                "ACWI market values covered only %d / %d tickers (threshold: %d) — skipping cache write.",
+                len(caps),
+                len(tickers),
+                min_required,
+            )
+        return caps
+
     log.info(
         "Fetching market caps for %d tickers (%d workers)…",
         len(tickers),
@@ -876,7 +976,7 @@ def fetch_market_caps(
             pool.shutdown(wait=True)
 
     log.info("  → market caps for %d / %d tickers", len(caps), len(tickers))
-    min_required = max(1, len(tickers) // 2)
+    min_required = _market_cap_min_required(len(tickers))
     if len(caps) >= min_required:
         _save_market_cap_cache(caps, index, len(tickers), market_cap_cache_file)
     else:
@@ -1822,14 +1922,19 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             len(tradable_constituents),
             len(constituents),
         )
+        market_caps: dict[str, float]
         if fund_weights is not None:
             tradable_weights = {
                 t: fund_weights[t] for t in tradable_constituents if t in fund_weights
             }
             total_w = sum(tradable_weights.values())
-            min_weight_coverage = max(1, len(tradable_constituents) // 2)
-            if total_w > 0 and len(tradable_weights) >= min_weight_coverage:
-                market_caps: dict[str, float] = {
+            if (
+                total_w > 0
+                and validate_market_cap_coverage(
+                    tradable_constituents, tradable_weights, top_n
+                )
+            ):
+                market_caps = {
                     t: w / total_w for t, w in tradable_weights.items()
                 }
                 log.info(
@@ -1848,6 +1953,13 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
                 )
         else:
             market_caps = fetch_market_caps(tradable_constituents, index, market_cap_cache_file)
+
+        if not validate_market_cap_coverage(tradable_constituents, market_caps, top_n):
+            log.error(
+                "REBALANCE ABORTED — market-cap data is incomplete; retry later "
+                "instead of planning against a degraded basket."
+            )
+            return
 
         top_stocks = select_public_tradable_stocks(
             client,

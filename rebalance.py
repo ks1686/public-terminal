@@ -1779,15 +1779,20 @@ def compute_delta(
     Return a (symbol, type, side, amount) order tuple if the drift exceeds the threshold,
     or None if within tolerance.
     """
+    min_order = (
+        MIN_CRYPTO_ORDER_DOLLARS
+        if instrument_type == InstrumentType.CRYPTO
+        else MIN_ORDER_DOLLARS
+    )
     delta = target_value - current_value
     drift_threshold = max(
         target_value * REBALANCE_THRESHOLD_PCT,
-        MIN_ORDER_DOLLARS,
+        min_order,
         threshold,
     )
     if delta > drift_threshold:
         return (symbol, instrument_type, OrderSide.BUY, delta.quantize(Decimal("0.01")))
-    if delta < -drift_threshold and abs(delta) >= MIN_ORDER_DOLLARS:
+    if delta < -drift_threshold:
         return (
             symbol,
             instrument_type,

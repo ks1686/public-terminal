@@ -725,10 +725,32 @@ class ToastModal(ModalScreen[None]):
         yield Label(self._msg, id="toast")
 
     def on_mount(self) -> None:
-        self.set_timer(self._timeout, lambda: self.dismiss(None))
+        # Schedule dismiss without returning a coroutine to the timer handler
+        import asyncio
+
+        def _cb():
+            try:
+                asyncio.create_task(self.dismiss(None))
+            except Exception:
+                # Fallback: call dismiss synchronously if scheduling fails
+                try:
+                    self.dismiss(None)
+                except Exception:
+                    pass
+
+        self.set_timer(self._timeout, _cb)
 
     def action_dismiss_toast(self) -> None:
-        self.dismiss(None)
+        # Schedule dismiss to avoid being awaited inside message handler
+        import asyncio
+
+        try:
+            asyncio.create_task(self.dismiss(None))
+        except Exception:
+            try:
+                self.dismiss(None)
+            except Exception:
+                pass
 
 
 class HistoryModal(ModalScreen):

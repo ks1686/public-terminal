@@ -695,6 +695,42 @@ class RebalanceNowConfirmModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 
 
+class ToastModal(ModalScreen[None]):
+    """Small dismissable popup for transient status messages."""
+
+    BINDINGS = [Binding("escape", "dismiss_toast", "Close", show=False)]
+
+    DEFAULT_CSS = """
+    ToastModal {
+        align: center top;
+    }
+    #toast {
+        width: auto;
+        height: auto;
+        border: rounded $primary;
+        background: $surface;
+        padding: 1 2;
+        margin-top: 1;
+        layer: overlay;
+    }
+    """
+
+    def __init__(self, msg: str, style: str = "dim", timeout: float = 4.0) -> None:
+        super().__init__()
+        self._msg = msg
+        self._style = style
+        self._timeout = timeout
+
+    def compose(self):
+        yield Label(self._msg, id="toast")
+
+    def on_mount(self) -> None:
+        self.set_timer(self._timeout, lambda: self.dismiss(None))
+
+    def action_dismiss_toast(self) -> None:
+        self.dismiss(None)
+
+
 class HistoryModal(ModalScreen):
     """Scrollable transaction history modal."""
 

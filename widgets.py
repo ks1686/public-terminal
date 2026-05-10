@@ -9,6 +9,7 @@ from public_api_sdk import OrderSide
 from rich.text import Text
 from textual import work
 from textual.widgets import DataTable, Static
+from modals import ToastModal
 
 from config import _ACTIVE_ORDER_STATUSES, BROKER_TO_YF_SYMBOLS
 
@@ -598,4 +599,14 @@ class StatusBar(Static):
     """
 
     def set_status(self, msg: str, style: str = "dim") -> None:
-        self.update(Text(msg, style=style))
+        # Show transient dismissable popup instead of persistent header text
+        if not msg:
+            self.update(Text(""))
+            return
+        try:
+            # Push a small toast modal; keep header clear
+            self.app.push_screen(ToastModal(msg, style=style))
+            self.update(Text(""))
+        except Exception:
+            # Fallback to header update if push fails
+            self.update(Text(msg, style=style))

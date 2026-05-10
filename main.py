@@ -4,8 +4,44 @@ from __future__ import annotations
 import sys
 
 
+def _get_installed_version() -> str | None:
+    """Return installed distribution version if available, else None."""
+    try:
+        import importlib.metadata as md
+    except Exception:
+        return None
+    for name in ("public-terminal", "public_terminal", "public_terminal"):
+        try:
+            return md.version(name)
+        except Exception:
+            continue
+    return None
+
+
+def _version_from_pyproject() -> str | None:
+    """Fallback: parse pyproject.toml for project.version."""
+    try:
+        import re
+        with open("pyproject.toml", "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*version\s*=\s*\"(.+?)\"", line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        return None
+
+
 def main() -> None:
     args = sys.argv[1:]
+
+    # Support --version early and exit
+    if "--version" in args or "-v" in args:
+        ver = _get_installed_version()
+        if not ver:
+            ver = _version_from_pyproject() or "unknown"
+        print(ver)
+        return
+
     if "--rebalance" in args:
         from config import migrate_if_needed
         migrate_if_needed()

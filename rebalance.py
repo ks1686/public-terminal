@@ -4,8 +4,9 @@ Portfolio daily rebalancer.
 
 Default target allocation (configurable via TUI settings)
   65%  Top-N index stocks, market-cap weighted within that slice
-  15%  Bitcoin (BTC)
-   5%  Ethereum (ETH)
+  12%  Bitcoin (BTC)
+   4%  Ethereum (ETH)
+   4%  Solana (SOL)
   10%  Gold via GLDM ETF
    5%  Cash (left uninvested as buying power)
 
@@ -66,8 +67,9 @@ from config import (
 # Default allocations — overridden at runtime by load_allocation_config()
 _DEFAULT_ALLOCS: dict[str, Decimal] = {
     "stocks": Decimal("0.65"),  # index stocks, market-cap weighted
-    "btc": Decimal("0.15"),  # Bitcoin
-    "eth": Decimal("0.05"),  # Ethereum
+    "btc": Decimal("0.12"),  # Bitcoin
+    "eth": Decimal("0.04"),  # Ethereum
+    "sol": Decimal("0.04"),  # Solana
     "gold": Decimal("0.10"),  # GLDM ETF
     "cash": Decimal("0.05"),  # uninvested cash (no orders placed)
 }
@@ -75,12 +77,14 @@ _DEFAULT_ALLOCS: dict[str, Decimal] = {
 ALLOC_STOCKS = _DEFAULT_ALLOCS["stocks"]
 ALLOC_BTC = _DEFAULT_ALLOCS["btc"]
 ALLOC_ETH = _DEFAULT_ALLOCS["eth"]
+ALLOC_SOL = _DEFAULT_ALLOCS["sol"]
 ALLOC_GOLD = _DEFAULT_ALLOCS["gold"]
 
 SP500_TOP_N = 500  # default: full index (capped by actual constituent count)
 GOLD_SYMBOL = "GLDM"
 BTC_SYMBOL = "BTC"
 ETH_SYMBOL = "ETH"
+SOL_SYMBOL = "SOL"
 NON_STOCK_ETFS = {GOLD_SYMBOL}  # equity symbols excluded from the stock index slice
 ISHARES_TO_BROKER_SYMBOLS = {
     "BRKB": "BRK.B",
@@ -241,7 +245,7 @@ def load_rebalance_config(
 def load_allocation_config(_cfg: dict | None = None) -> dict[str, Decimal]:
     """Return allocation fractions from rebalance_config.json.
 
-    Keys: stocks, btc, eth, gold, cash.  Values sum to 1.0.
+    Keys: stocks, btc, eth, sol, gold, cash.  Values sum to 1.0.
     'cash' is the uninvested fraction — no orders are placed for it.
     Falls back to _DEFAULT_ALLOCS if the config is missing, invalid, or doesn't sum to 1.
     _cfg: pre-loaded config dict (avoids a second file read when called alongside load_rebalance_config).
@@ -1700,13 +1704,13 @@ def compute_supplemental_sells(
 
     Candidates are stock equity positions that are not already being sold or
     bought this run and were not purchased today (day-trade prevention).
-    BTC, ETH, and GLDM are never candidates.
+    BTC, ETH, SOL, and GLDM are never candidates.
 
     Candidates are ordered by ascending target value so the least-important
     positions are sacrificed first. Each sell is sized to the minimum of the
     held position value and the remaining shortfall.
     """
-    protected = {BTC_SYMBOL, ETH_SYMBOL, GOLD_SYMBOL}
+    protected = {BTC_SYMBOL, ETH_SYMBOL, SOL_SYMBOL, GOLD_SYMBOL}
     candidates = [
         symbol
         for symbol in equity_pos
@@ -1743,19 +1747,20 @@ def _sort_buys_by_priority(
     Return buys in fixed priority tier order:
       Tier 0: BTC
       Tier 1: ETH
-      Tier 2: GLDM (gold)
-      Tier 3: Stock index positions, sorted by target value descending.
+      Tier 2: SOL
+      Tier 3: GLDM (gold)
+      Tier 4+: Stock index positions, sorted by target value descending.
 
-    Within Tier 3, a stock's target value is
+    Within Tier 4+, a stock's target value is
     stock_weights[symbol] * alloc_stocks * investment_base.
     Stocks with no entry in stock_weights sort last (target = 0).
     """
-    _TIER: dict[str, int] = {BTC_SYMBOL: 0, ETH_SYMBOL: 1, GOLD_SYMBOL: 2}
+    _TIER: dict[str, int] = {BTC_SYMBOL: 0, ETH_SYMBOL: 1, SOL_SYMBOL: 2, GOLD_SYMBOL: 3}
 
     def _key(order: tuple) -> tuple:
         symbol: str = order[0]
-        tier = _TIER.get(symbol, 3)
-        if tier < 3:
+        tier = _TIER.get(symbol, 4)
+        if tier < 4:
             return (tier, Decimal("0"))
         target = stock_weights.get(symbol, Decimal("0")) * alloc_stocks * investment_base
         return (tier, -target)
@@ -1872,13 +1877,15 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
     alloc_stocks = alloc["stocks"]
     alloc_btc = alloc["btc"]
     alloc_eth = alloc["eth"]
+    alloc_sol = alloc["sol"]
     alloc_gold = alloc["gold"]
     alloc_cash = alloc["cash"]
     log.info(
-        "  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% gold  |  %.0f%% cash",
+        "  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% SOL  |  %.0f%% gold  |  %.0f%% cash",
         alloc_stocks * 100,
         alloc_btc * 100,
         alloc_eth * 100,
+        alloc_sol * 100,
         alloc_gold * 100,
         alloc_cash * 100,
     )
@@ -2097,7 +2104,7 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             )
 
         crypto_prices: dict[str, Decimal] = {}
-        crypto_allocs = {BTC_SYMBOL: alloc_btc, ETH_SYMBOL: alloc_eth}
+        crypto_allocs = {BTC_SYMBOL: alloc_btc, ETH_SYMBOL: alloc_eth, SOL_SYMBOL: alloc_sol}
         crypto_to_fetch = {
             symbol: BROKER_TO_YF_SYMBOLS.get(symbol, f"{symbol}-USD")
             for symbol, alloc_pct in crypto_allocs.items()
@@ -2177,6 +2184,27 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
                 InstrumentType.CRYPTO,
                 eth_target,
                 eth_current,
+                Decimal("1.00"),
+            )
+        )
+
+        log.info("--- Computing SOL delta ---")
+        sol_price = crypto_prices.get(SOL_SYMBOL, Decimal("0"))
+        sol_target = Decimal("0") if SOL_SYMBOL in excluded_tickers else (alloc_sol * investment_base).quantize(Decimal("0.01"))
+        sol_current = crypto_pos.get(SOL_SYMBOL, Decimal("0"))
+        log.info(
+            "  SOL  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+            sol_price,
+            sol_target,
+            sol_current,
+            sol_target - sol_current,
+        )
+        queue(
+            compute_delta(
+                SOL_SYMBOL,
+                InstrumentType.CRYPTO,
+                sol_target,
+                sol_current,
                 Decimal("1.00"),
             )
         )

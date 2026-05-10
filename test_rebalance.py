@@ -129,13 +129,14 @@ class TestLoadAllocationConfig(unittest.TestCase):
                 "stocks": "0.50",
                 "btc": "0.20",
                 "eth": "0.10",
+                "sol": "0.05",
                 "gold": "0.10",
-                "cash": "0.10",
+                "cash": "0.05",
             }
         }
         allocs = load_allocation_config(cfg)
         self.assertEqual(allocs["stocks"], Decimal("0.50"))
-        self.assertEqual(allocs["cash"], Decimal("0.10"))
+        self.assertEqual(allocs["cash"], Decimal("0.05"))
 
     def test_allocations_not_summing_to_one_fall_back_to_defaults(self) -> None:
         cfg = {
@@ -541,6 +542,10 @@ class TestComputeSupplementalSells(unittest.TestCase):
         result = self._call("100", {"ETH": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
         self.assertNotIn("ETH", [r[0] for r in result])
 
+    def test_excludes_sol(self) -> None:
+        result = self._call("100", {"SOL": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
+        self.assertNotIn("SOL", [r[0] for r in result])
+
     def test_excludes_gldm(self) -> None:
         result = self._call("100", {"GLDM": 500, "AAPL": 200}, stock_weights={"AAPL": 0.1})
         self.assertNotIn("GLDM", [r[0] for r in result])
@@ -629,11 +634,13 @@ class TestSortBuysByPriority(unittest.TestCase):
         orders = [
             self._order("AAPL"),
             self._order("GLDM"),
+            self._order("SOL", self._CR),
             self._order("ETH", self._CR),
         ]
         result = self._sort(orders, {"AAPL": 0.1})
         symbols = [r[0] for r in result]
-        self.assertLess(symbols.index("ETH"), symbols.index("GLDM"))
+        self.assertLess(symbols.index("ETH"), symbols.index("SOL"))
+        self.assertLess(symbols.index("SOL"), symbols.index("GLDM"))
         self.assertLess(symbols.index("GLDM"), symbols.index("AAPL"))
 
     def test_stocks_sorted_by_target_value_descending(self) -> None:
@@ -660,6 +667,7 @@ class TestSortBuysByPriority(unittest.TestCase):
             self._order("NVDA"),
             self._order("GLDM"),
             self._order("AAPL"),
+            self._order("SOL", self._CR),
             self._order("ETH", self._CR),
             self._order("BTC", self._CR),
             self._order("MSFT"),
@@ -667,9 +675,9 @@ class TestSortBuysByPriority(unittest.TestCase):
         weights = {"NVDA": 0.05, "AAPL": 0.10, "MSFT": 0.15}
         result = self._sort(orders, weights)
         symbols = [r[0] for r in result]
-        self.assertEqual(symbols[:3], ["BTC", "ETH", "GLDM"])
+        self.assertEqual(symbols[:4], ["BTC", "ETH", "SOL", "GLDM"])
         # remaining stocks: MSFT > AAPL > NVDA
-        self.assertEqual(symbols[3:], ["MSFT", "AAPL", "NVDA"])
+        self.assertEqual(symbols[4:], ["MSFT", "AAPL", "NVDA"])
 
 
 # ---------------------------------------------------------------------------
@@ -836,6 +844,7 @@ class TestConstituentPreFiltering(unittest.TestCase):
                     "stocks": Decimal("1"),
                     "btc": Decimal("0"),
                     "eth": Decimal("0"),
+                    "sol": Decimal("0"),
                     "gold": Decimal("0"),
                     "cash": Decimal("0"),
                 },
@@ -1046,6 +1055,7 @@ class TestRebalanceFundWeights(unittest.TestCase):
                     "stocks": Decimal("1"),
                     "btc": Decimal("0"),
                     "eth": Decimal("0"),
+                    "sol": Decimal("0"),
                     "gold": Decimal("0"),
                     "cash": Decimal("0"),
                 },

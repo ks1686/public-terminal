@@ -260,6 +260,7 @@ BROKER_TO_YF_SYMBOLS = {
     "BRK.B": "BRK-B",
     "BTC": "BTC-USD",
     "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
 }
 
 YF_TO_BROKER_SYMBOLS = {

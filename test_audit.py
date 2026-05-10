@@ -238,6 +238,7 @@ class OrderSafetyTests(unittest.TestCase):
                     "stocks": Decimal("1"),
                     "btc": Decimal("0"),
                     "eth": Decimal("0"),
+                    "sol": Decimal("0"),
                     "gold": Decimal("0"),
                     "cash": Decimal("0"),
                 },

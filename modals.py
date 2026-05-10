@@ -897,6 +897,7 @@ class RebalanceConfigModal(ModalScreen):
         "input-stocks",
         "input-btc",
         "input-eth",
+        "input-sol",
         "input-gold",
         "input-cash",
     )
@@ -904,6 +905,7 @@ class RebalanceConfigModal(ModalScreen):
         "stocks": "Stocks %",
         "btc": "Bitcoin %",
         "eth": "Ethereum %",
+        "sol": "Solana %",
         "gold": "Gold %",
         "cash": "Cash %",
     }
@@ -991,7 +993,7 @@ class RebalanceConfigModal(ModalScreen):
                 classes="field-label",
             )
             yield Label(
-                "Stocks = Top N index basket | BTC = Bitcoin | ETH = Ethereum",
+                "Stocks = Top N index basket | BTC = Bitcoin | ETH = Ethereum | SOL = Solana",
                 classes="field-help",
             )
             yield Label(
@@ -1003,9 +1005,11 @@ class RebalanceConfigModal(ModalScreen):
                 value=str(round(a.get("stocks", 0.65) * 100)), id="input-stocks"
             )
             yield Label("Bitcoin (BTC) %", classes="field-label")
-            yield Input(value=str(round(a.get("btc", 0.15) * 100)), id="input-btc")
+            yield Input(value=str(round(a.get("btc", 0.12) * 100)), id="input-btc")
             yield Label("Ethereum (ETH) %", classes="field-label")
-            yield Input(value=str(round(a.get("eth", 0.05) * 100)), id="input-eth")
+            yield Input(value=str(round(a.get("eth", 0.04) * 100)), id="input-eth")
+            yield Label("Solana (SOL) %", classes="field-label")
+            yield Input(value=str(round(a.get("sol", 0.04) * 100)), id="input-sol")
             yield Label("Gold (GLDM ETF) %", classes="field-label")
             yield Input(value=str(round(a.get("gold", 0.10) * 100)), id="input-gold")
             yield Label("Cash (uninvested buying power) %", classes="field-label")

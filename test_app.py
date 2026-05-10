@@ -1,6 +1,5 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from app import PublicTerminal
 from decimal import Decimal
 import asyncio
 
@@ -91,7 +90,7 @@ async def test_startup_no_credentials():
          patch("app.get_accounts", return_value=[]):
         from app import PublicTerminal
         app = PublicTerminal()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             # SetupModal is usually the first screen if no credentials
             assert app.screen.__class__.__name__ == "SetupModal"
 
@@ -149,7 +148,7 @@ async def test_toggle_rebalancer_no_systemctl(app_with_mocks):
 
 @pytest.mark.asyncio
 async def test_settings_save_notifies(app_with_mocks):
-    async with app_with_mocks.run_test() as pilot:
+    async with app_with_mocks.run_test():
         with patch("app._save_rebalance_config") as mock_save, \
              patch.object(app_with_mocks, "notify") as mock_notify:
             
@@ -170,7 +169,7 @@ async def test_settings_save_notifies(app_with_mocks):
 
 @pytest.mark.asyncio
 async def test_account_switching_resets_client(app_with_mocks):
-    async with app_with_mocks.run_test() as pilot:
+    async with app_with_mocks.run_test():
         with patch("app.get_accounts", return_value=["ACCT1", "ACCT2"]), \
              patch.object(app_with_mocks, "load_portfolio") as mock_load:
             

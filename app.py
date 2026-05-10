@@ -730,7 +730,7 @@ class PublicTerminal(App):
                 request.stop_price = stop_price
                 request.limit_price = limit_price
             
-            new_order = client.place_order(request)
+            client.place_order(request)
             
             # Build order type description for status message
             order_desc = order_type

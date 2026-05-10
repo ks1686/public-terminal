@@ -741,25 +741,26 @@ class PublicTerminal(App):
             elif order_type == "STOP_LIMIT" and stop_price and limit_price:
                 order_desc = f"STOP_LIMIT stop@${stop_price:,.2f}/limit@${limit_price:,.2f}"
             
+            self.notify(
+                f"Order submitted: {side.value} {quantity} {symbol} ({order_desc})",
+                title="Order Placed",
+                severity="information"
+            )
+            # Keep status bar for persistent state (account ID + hint)
             self.call_from_thread(
                 status.set_status,
-                f"  Order submitted: {side.value} {quantity} {symbol} ({order_desc}) (ID: {new_order.order_id[:8]}…)"
-                + _HINT,
-                "green",
+                f"  {self._active_account}" + _HINT
             )
             self.call_from_thread(self.load_portfolio)
         except Exception as exc:
-            self.call_from_thread(status.set_status, f"  Order failed: {exc}", "red")
+            self.notify(f"Order failed: {exc}", severity="error")
 
     def action_view_order(self) -> None:
         """View and modify details of selected open order."""
         orders_table = self.query_one(OrdersTable)
         result = orders_table.get_selected_order_id()
         if result is None:
-            self.query_one(StatusBar).set_status(
-                "  No open order selected — use arrow keys to select a row in Orders",
-                "yellow",
-            )
+            self.notify("No open order selected", severity="warning")
             return
         order_id, symbol = result
         
@@ -823,10 +824,7 @@ class PublicTerminal(App):
         orders_table = self.query_one(OrdersTable)
         result = orders_table.get_selected_order_id()
         if result is None:
-            self.query_one(StatusBar).set_status(
-                "  No open order selected — use arrow keys to select a row in Orders",
-                "yellow",
-            )
+            self.notify("No open order selected", severity="warning")
             return
         order_id, symbol = result
         self.push_screen(

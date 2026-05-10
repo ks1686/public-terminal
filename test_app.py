@@ -30,3 +30,34 @@ async def test_app_startup_and_mocked_portfolio():
                 assert app.title == "PUBLIC TERMINAL"
                 # We just want to ensure it reaches the main screen without crashing
                 await pilot.pause()
+
+@pytest.mark.asyncio
+async def test_action_view_order_no_selection_notifies():
+    mock_client = MagicMock()
+    mock_portfolio = MagicMock()
+    mock_portfolio.equity = "10000.00"
+    mock_portfolio.cash = "500.00"
+    mock_portfolio.positions = []
+    mock_portfolio.orders = []
+    mock_client.get_portfolio.return_value = mock_portfolio
+    mock_client.get_accounts.return_value = [{"accountNumber": "TEST_ACCT"}]
+
+    mock_path = MagicMock()
+    mock_path.read_text.return_value = "{}"
+    
+    with patch("app.get_accounts", return_value=["TEST_ACCT"]), \
+         patch("client.get_client", return_value=mock_client), \
+         patch("app.get_portfolio_cache_path", return_value=mock_path), \
+         patch("app._credentials_present", return_value=True):
+        
+        app = PublicTerminal()
+        async with app.run_test() as pilot:
+            with patch.object(app, "notify") as mock_notify:
+                await pilot.pause()
+                # Trigger the action when no order is selected
+                await pilot.press("v")
+                
+                # Check notifications
+                mock_notify.assert_called_once_with("No open order selected", severity="warning")
+
+

@@ -859,59 +859,48 @@ class PublicTerminal(App):
     def action_toggle_rebalancer(self) -> None:
         status = self.query_one(StatusBar)
         if not _HAS_SYSTEMCTL:
-            self.call_from_thread(
-                status.set_status,
-                "  Pause/resume requires systemctl on this platform.",
-                "red",
+            self.notify(
+                "Pause/resume requires systemctl on this platform.",
+                severity="error",
             )
             return
 
         rc_enabled, _ = self._systemctl("is-enabled", TIMER_UNIT)
         if rc_enabled != 0:
-            self.call_from_thread(
-                status.set_status,
-                "  No rebalancer schedule installed — press [e] to install it."
-                + _HINT,
-                "yellow",
+            self.notify(
+                "No rebalancer schedule installed — press [e] to install it.",
+                severity="warning",
             )
             self.call_from_thread(self.load_rebalancer_status)
             return
 
         rc, _ = self._systemctl("is-active", TIMER_UNIT)
         if rc == 0:
-            self.call_from_thread(
-                status.set_status,
-                "  Pausing rebalancer schedule…" + _HINT,
-                "yellow",
-            )
+            self.notify("Pausing rebalancer schedule…")
             rc2, out = self._systemctl("stop", TIMER_UNIT)
             msg = (
-                "  Rebalancer schedule paused — press [t] to resume."
+                "Rebalancer schedule paused — press [t] to resume."
                 if rc2 == 0
-                else f"  Pause failed: {out}"
+                else f"Pause failed: {out}"
             )
         else:
-            self.call_from_thread(
-                status.set_status,
-                "  Resuming rebalancer schedule…" + _HINT,
-                "yellow",
-            )
+            self.notify("Resuming rebalancer schedule…")
             ok, prep_msg = self._reload_timer_unit()
             if not ok:
-                self.call_from_thread(
-                    status.set_status,
-                    f"  Could not resume schedule: {prep_msg}",
-                    "red",
+                self.notify(
+                    f"Could not resume schedule: {prep_msg}",
+                    severity="error",
                 )
                 return
             rc2, out = self._systemctl("start", TIMER_UNIT)
             msg = (
-                "  Rebalancer schedule resumed — next run follows the 12:00 ET schedule."
+                "Rebalancer schedule resumed — next run follows the 12:00 ET schedule."
                 if rc2 == 0
-                else f"  Resume failed: {out}"
+                else f"Resume failed: {out}"
             )
+        self.notify(msg, severity="information" if rc2 == 0 else "error")
         self.call_from_thread(
-            status.set_status, msg + _HINT, "green" if rc2 == 0 else "red"
+            status.set_status, f"  {self._active_account}" + _HINT
         )
         self.call_from_thread(self.load_rebalancer_status)
 
@@ -919,61 +908,44 @@ class PublicTerminal(App):
     def action_toggle_enable_rebalancer(self) -> None:
         status = self.query_one(StatusBar)
         if not _HAS_SYSTEMCTL:
-            self.call_from_thread(
-                status.set_status,
-                "  Install/remove schedule requires systemctl on this platform.",
-                "red",
+            self.notify(
+                "Install/remove schedule requires systemctl on this platform.",
+                severity="error",
             )
             return
 
         rc, _ = self._systemctl("is-enabled", TIMER_UNIT)
         if rc == 0:
-            self.call_from_thread(
-                status.set_status,
-                "  Removing rebalancer schedule…" + _HINT,
-                "yellow",
-            )
+            self.notify("Removing rebalancer schedule…")
             try:
                 _remove_service_files()
-                self.call_from_thread(
-                    status.set_status,
-                    "  Rebalancer schedule removed." + _HINT,
-                    "cyan",
+                self.notify(
+                    "Rebalancer schedule removed.", severity="information"
                 )
             except Exception as exc:
-                self.call_from_thread(
-                    status.set_status, f"  Remove schedule failed: {exc}", "red"
-                )
+                self.notify(f"Remove schedule failed: {exc}", severity="error")
                 return
         else:
-            self.call_from_thread(
-                status.set_status,
-                "  Installing rebalancer schedule…" + _HINT,
-                "yellow",
-            )
+            self.notify("Installing rebalancer schedule…")
             try:
                 _install_service_files()
                 rc2, out = self._systemctl("enable", "--now", TIMER_UNIT)
             except Exception as exc:
-                self.call_from_thread(
-                    status.set_status,
-                    f"  Install/enable failed: {exc}",
-                    "red",
-                )
+                self.notify(f"Install/enable failed: {exc}", severity="error")
                 return
             if rc2 != 0:
-                self.call_from_thread(
-                    status.set_status,
-                    f"  Schedule activation failed: {out}" + _HINT,
-                    "red",
+                self.notify(
+                    f"Schedule activation failed: {out}", severity="error"
                 )
                 return
-            self.call_from_thread(
-                status.set_status,
-                "  Rebalancer timer enabled — scheduled Mon-Fri at 12:00 ET."
-                + _HINT,
-                "green",
+            self.notify(
+                "Rebalancer timer enabled — scheduled Mon-Fri at 12:00 ET.",
+                severity="information",
             )
+        
+        self.call_from_thread(
+            status.set_status, f"  {self._active_account}" + _HINT
+        )
         self.call_from_thread(self.load_rebalancer_status)
 
     def action_skip_next_rebalance(self) -> None:
@@ -981,17 +953,19 @@ class PublicTerminal(App):
         skip_file = get_skip_file_path(self._active_account)
         try:
             skip_file.unlink()
-            status.set_status(
-                "  Skip cancelled — next run will proceed normally." + _HINT, "cyan"
+            self.notify(
+                "Skip cancelled — next run will proceed normally.",
+                severity="information",
             )
         except FileNotFoundError:
             skip_file.parent.mkdir(exist_ok=True)
             skip_file.touch()
-            status.set_status(
-                "  Next rebalance run will be skipped. Press [x] again to cancel."
-                + _HINT,
-                "yellow",
+            self.notify(
+                "Next rebalance run will be skipped. Press [x] again to cancel.",
+                severity="warning",
             )
+        
+        status.set_status(f"  {self._active_account}" + _HINT)
         self.load_rebalancer_status()
 
     def action_rebalance_now(self) -> None:
@@ -1006,25 +980,21 @@ class PublicTerminal(App):
     @work(thread=True)
     def _trigger_rebalance_now(self) -> None:
         status = self.query_one(StatusBar)
-        self.call_from_thread(
-            status.set_status, "  Starting on-demand rebalance…" + _HINT, "yellow"
-        )
+        self.notify("Starting on-demand rebalance…")
 
         if _HAS_SYSTEMCTL and SERVICE_UNIT_PATH.exists():
             rc, out = self._systemctl("start", "--no-block", SERVICE_UNIT)
             if rc == 0:
-                self.call_from_thread(
-                    status.set_status,
-                    f"  Rebalance started — tail logs with: journalctl --user -u {SERVICE_UNIT} -f"
-                    + _HINT,
-                    "green",
+                self.notify(
+                    f"Rebalance started — tail logs with: journalctl --user -u {SERVICE_UNIT} -f",
+                    severity="information",
                 )
             else:
-                self.call_from_thread(
-                    status.set_status,
-                    f"  Failed to start rebalance: {out}" + _HINT,
-                    "red",
-                )
+                self.notify(f"Failed to start rebalance: {out}", severity="error")
+            
+            self.call_from_thread(
+                status.set_status, f"  {self._active_account}" + _HINT
+            )
             self.call_from_thread(self.load_rebalancer_status)
             return
 
@@ -1042,15 +1012,18 @@ class PublicTerminal(App):
                 start_new_session=True,
             )
         except Exception as exc:
+            self.notify(f"Failed to start rebalance: {exc}", severity="error")
             self.call_from_thread(
-                status.set_status, f"  Failed to start rebalance: {exc}" + _HINT, "red"
+                status.set_status, f"  {self._active_account}" + _HINT
             )
             return
 
+        self.notify(
+            "Rebalance started — logs in cache/rebalance.log",
+            severity="information",
+        )
         self.call_from_thread(
-            status.set_status,
-            "  Rebalance started — logs in cache/rebalance.log" + _HINT,
-            "green",
+            status.set_status, f"  {self._active_account}" + _HINT
         )
 
     def action_rebalance_settings(self) -> None:
@@ -1108,17 +1081,18 @@ class PublicTerminal(App):
                 f"gold {round(a['gold'] * 100)}%  "
                 f"cash {round(a['cash'] * 100)}%"
             )
-            enabled_str = "" if result.get("rebalance_enabled", True) else "  REBALANCING DISABLED"
-            self.query_one(StatusBar).set_status(
-                f"  Saved: {index_label} top-{result['top_n']}  margin {pct}%{excl_str}  |  {alloc_summary}{enabled_str}"
-                + _HINT,
-                "green",
+            enabled_str = (
+                "" if result.get("rebalance_enabled", True) else " REBALANCING DISABLED"
             )
+            self.notify(
+                f"Saved: {index_label} top-{result['top_n']} margin {pct}%{excl_str} | {alloc_summary}{enabled_str}",
+                severity="information",
+            )
+            self.query_one(StatusBar).set_status(f"  {self._active_account}" + _HINT)
             self.load_rebalancer_status()
         except OSError as exc:
-            self.query_one(StatusBar).set_status(
-                f"  Failed to save config: {exc}", "red"
-            )
+            self.notify(f"Failed to save config: {exc}", severity="error")
+            self.query_one(StatusBar).set_status(f"  {self._active_account}" + _HINT)
 
     def action_chart_prev(self) -> None:
         self.query_one(PortfolioChart).cycle_period(-1)

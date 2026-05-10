@@ -22,11 +22,22 @@ def _version_from_pyproject() -> str | None:
     """Fallback: parse pyproject.toml for project.version."""
     try:
         import re
-        with open("pyproject.toml", "r", encoding="utf-8") as f:
-            for line in f:
-                m = re.match(r"\s*version\s*=\s*\"(.+?)\"", line)
-                if m:
-                    return m.group(1)
+        import os
+
+        # Try to find pyproject.toml in parent directories
+        paths_to_try = [
+            "pyproject.toml",  # Current directory
+            "../pyproject.toml",  # Parent
+            os.path.join(os.path.dirname(__file__), "pyproject.toml"),  # Script dir
+        ]
+        
+        for path in paths_to_try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        m = re.match(r"\s*version\s*=\s*\"(.+?)\"", line)
+                        if m:
+                            return m.group(1)
     except Exception:
         return None
 

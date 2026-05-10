@@ -695,62 +695,9 @@ class RebalanceNowConfirmModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 
 
-class ToastModal(ModalScreen[None]):
-    """Small dismissable popup for transient status messages."""
-
-    BINDINGS = [Binding("escape", "dismiss_toast", "Close", show=False)]
-
-    DEFAULT_CSS = """
-    ToastModal {
-        align: center top;
-    }
-    #toast {
-        width: auto;
-        height: auto;
-        border: rounded $primary;
-        background: $surface;
-        padding: 1 2;
-        margin-top: 1;
-        layer: overlay;
-    }
-    """
-
-    def __init__(self, msg: str, style: str = "dim", timeout: float = 4.0) -> None:
-        super().__init__()
-        self._msg = msg
-        self._style = style
-        self._timeout = timeout
-
-    def compose(self):
-        yield Label(self._msg, id="toast")
-
-    def on_mount(self) -> None:
-        # Schedule dismiss without returning a coroutine to the timer handler
-        import asyncio
-
-        def _cb():
-            try:
-                asyncio.create_task(self.dismiss(None))
-            except Exception:
-                # Fallback: call dismiss synchronously if scheduling fails
-                try:
-                    self.dismiss(None)
-                except Exception:
-                    pass
-
-        self.set_timer(self._timeout, _cb)
-
-    def action_dismiss_toast(self) -> None:
-        # Schedule dismiss to avoid being awaited inside message handler
-        import asyncio
-
-        try:
-            asyncio.create_task(self.dismiss(None))
-        except Exception:
-            try:
-                self.dismiss(None)
-            except Exception:
-                pass
+# ---------------------------------------------------------------------------
+# Transaction history
+# ---------------------------------------------------------------------------
 
 
 class HistoryModal(ModalScreen):

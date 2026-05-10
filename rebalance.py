@@ -1874,21 +1874,18 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
     _cfg = _load_config_json(rebalance_config_file)
     index, top_n, margin_usage_pct, excluded_tickers = load_rebalance_config(_cfg)
     alloc = load_allocation_config(_cfg)
-    alloc_stocks = alloc["stocks"]
-    alloc_btc = alloc["btc"]
-    alloc_eth = alloc["eth"]
-    alloc_sol = alloc["sol"]
-    alloc_gold = alloc["gold"]
-    alloc_cash = alloc["cash"]
-    log.info(
-        "  Allocation: %.0f%% stocks  |  %.0f%% BTC  |  %.0f%% ETH  |  %.0f%% SOL  |  %.0f%% gold  |  %.0f%% cash",
-        alloc_stocks * 100,
-        alloc_btc * 100,
-        alloc_eth * 100,
-        alloc_sol * 100,
-        alloc_gold * 100,
-        alloc_cash * 100,
-    )
+    alloc_parts = []
+    for key in ("stocks", "btc", "eth", "sol", "gold", "cash"):
+        val = alloc.get(key, Decimal("0"))
+        if val > 0:
+            alloc_parts.append(f"{val * 100:.0f}% {key}")
+    log.info("  Allocation: %s", "  |  ".join(alloc_parts))
+    alloc_stocks = alloc.get("stocks", Decimal("0"))
+    alloc_btc = alloc.get("btc", Decimal("0"))
+    alloc_eth = alloc.get("eth", Decimal("0"))
+    alloc_sol = alloc.get("sol", Decimal("0"))
+    alloc_gold = alloc.get("gold", Decimal("0"))
+    alloc_cash = alloc.get("cash", Decimal("0"))
     log.info(
         "  Index: %s (%s) — top %d",
         index,
@@ -2146,68 +2143,35 @@ def rebalance(dry_run: bool = False, account_id: str | None = None) -> None:
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
 
-        log.info("--- Computing BTC delta ---")
-        btc_price = crypto_prices.get(BTC_SYMBOL, Decimal("0"))
-        btc_target = Decimal("0") if BTC_SYMBOL in excluded_tickers else (alloc_btc * investment_base).quantize(Decimal("0.01"))
-        btc_current = crypto_pos.get(BTC_SYMBOL, Decimal("0"))
-        log.info(
-            "  BTC  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-            btc_price,
-            btc_target,
-            btc_current,
-            btc_target - btc_current,
-        )
-        queue(
-            compute_delta(
-                BTC_SYMBOL,
-                InstrumentType.CRYPTO,
-                btc_target,
-                btc_current,
-                Decimal("1.00"),
-            )
-        )
+        for symbol, target_alloc in crypto_allocs.items():
+            if symbol in excluded_tickers:
+                continue
+            
+            current_val = crypto_pos.get(symbol, Decimal("0"))
+            if target_alloc <= 0 and current_val <= 0:
+                continue
 
-        log.info("--- Computing ETH delta ---")
-        eth_price = crypto_prices.get(ETH_SYMBOL, Decimal("0"))
-        eth_target = Decimal("0") if ETH_SYMBOL in excluded_tickers else (alloc_eth * investment_base).quantize(Decimal("0.01"))
-        eth_current = crypto_pos.get(ETH_SYMBOL, Decimal("0"))
-        log.info(
-            "  ETH  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-            eth_price,
-            eth_target,
-            eth_current,
-            eth_target - eth_current,
-        )
-        queue(
-            compute_delta(
-                ETH_SYMBOL,
-                InstrumentType.CRYPTO,
-                eth_target,
-                eth_current,
-                Decimal("1.00"),
+            log.info("--- Computing %s delta ---", symbol)
+            price = crypto_prices.get(symbol, Decimal("0"))
+            target_val = (target_alloc * investment_base).quantize(Decimal("0.01"))
+            
+            log.info(
+                "  %-4s price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
+                symbol,
+                price,
+                target_val,
+                current_val,
+                target_val - current_val,
             )
-        )
-
-        log.info("--- Computing SOL delta ---")
-        sol_price = crypto_prices.get(SOL_SYMBOL, Decimal("0"))
-        sol_target = Decimal("0") if SOL_SYMBOL in excluded_tickers else (alloc_sol * investment_base).quantize(Decimal("0.01"))
-        sol_current = crypto_pos.get(SOL_SYMBOL, Decimal("0"))
-        log.info(
-            "  SOL  price=$%.2f  target=$%.2f  current=$%.2f  delta=$%.2f",
-            sol_price,
-            sol_target,
-            sol_current,
-            sol_target - sol_current,
-        )
-        queue(
-            compute_delta(
-                SOL_SYMBOL,
-                InstrumentType.CRYPTO,
-                sol_target,
-                sol_current,
-                Decimal("1.00"),
+            queue(
+                compute_delta(
+                    symbol,
+                    InstrumentType.CRYPTO,
+                    target_val,
+                    current_val,
+                    Decimal("1.00"),
+                )
             )
-        )
 
         log.info("--- Computing GLDM delta ---")
         queue_etf_delta(GOLD_SYMBOL, alloc_gold)

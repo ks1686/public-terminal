@@ -1074,13 +1074,13 @@ class PublicTerminal(App):
             excl_str = f"  excl {len(excl)}" if excl else ""
             index_label = SUPPORTED_INDEXES.get(result["index"], result["index"])
             a = result["allocations"]
-            alloc_summary = (
-                f"stk {round(a['stocks'] * 100)}%  "
-                f"btc {round(a['btc'] * 100)}%  "
-                f"eth {round(a['eth'] * 100)}%  "
-                f"gold {round(a['gold'] * 100)}%  "
-                f"cash {round(a['cash'] * 100)}%"
-            )
+            alloc_parts = []
+            # Order matches default config keys for consistency
+            for key in ("stocks", "btc", "eth", "sol", "gold", "cash"):
+                if key in a and a[key] > 0:
+                    label = "stk" if key == "stocks" else key
+                    alloc_parts.append(f"{label} {round(a[key] * 100)}%")
+            alloc_summary = "  ".join(alloc_parts)
             enabled_str = (
                 "" if result.get("rebalance_enabled", True) else " REBALANCING DISABLED"
             )

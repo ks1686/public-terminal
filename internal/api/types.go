@@ -166,7 +166,7 @@ type Bar struct {
 	Low       decimal.Decimal `json:"low"`
 	Close     decimal.Decimal `json:"close"`
 	Value     decimal.Decimal `json:"value"`
-	Volume    int64           `json:"volume"`
+	Volume    decimal.Decimal `json:"volume"` // some sessions return as string
 }
 
 type marketSessionBars struct {

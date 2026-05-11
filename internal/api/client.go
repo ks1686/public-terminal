@@ -298,17 +298,22 @@ func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, err
 	if err != nil {
 		return nil, err
 	}
+	// Try the session-partitioned shape first.
 	var resp BarsResponse
-	if err := json.Unmarshal(out, &resp); err == nil {
-		flat := resp.Flatten()
-		if len(flat) > 0 {
+	respErr := json.Unmarshal(out, &resp)
+	if respErr == nil {
+		if flat := resp.Flatten(); len(flat) > 0 {
 			return flat, nil
 		}
 	}
 	// Fallback: some endpoints may return a flat list.
 	var bars []Bar
-	if err := json.Unmarshal(out, &bars); err != nil {
-		return nil, fmt.Errorf("parsing bars: %w\nraw: %.200s", err, out)
+	if listErr := json.Unmarshal(out, &bars); listErr == nil {
+		return bars, nil
 	}
-	return bars, nil
+	// Neither shape parsed — surface whichever error we have, with raw context.
+	if respErr != nil {
+		return nil, fmt.Errorf("parsing bars (session shape): %w\nraw: %.500s", respErr, out)
+	}
+	return nil, fmt.Errorf("bars response had no points; raw: %.500s", out)
 }

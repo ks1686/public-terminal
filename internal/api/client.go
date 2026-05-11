@@ -71,16 +71,25 @@ func readTokenFromEnv(envFile string) string {
 // run executes: public --json <args...>
 // --json is a root-level flag in the publicdotcom-cli (declared on app.callback()),
 // so it must come BEFORE the subcommand, not after.
-// The token is injected via PUBLIC_ACCESS_TOKEN env var.
+//
+// Auth: the value stored in our .env under PUBLIC_ACCESS_TOKEN is actually a
+// long-lived personal secret (the API secret key from public.com). The new CLI
+// treats PUBLIC_ACCESS_TOKEN as a short-lived JWT and PUBLIC_PERSONAL_SECRET as
+// the refresh material. We expose our token to the CLI as PUBLIC_PERSONAL_SECRET
+// so its auto-refresh mints a fresh JWT on first call and caches it in keyring.
 func (c *Client) run(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	fullArgs := append([]string{"--json"}, args...)
 	cmd := exec.CommandContext(ctx, c.bin, fullArgs...)
-	// Inject token via env var; the CLI reads PUBLIC_ACCESS_TOKEN automatically.
-	env := append(os.Environ(), "PUBLIC_ACCESS_TOKEN="+c.token)
-	cmd.Env = env
+	// Clear any inherited PUBLIC_ACCESS_TOKEN so the CLI doesn't try to use the
+	// personal secret as if it were a short-lived JWT; rely on keyring cache +
+	// auto-refresh from PUBLIC_PERSONAL_SECRET instead.
+	cmd.Env = append(os.Environ(),
+		"PUBLIC_ACCESS_TOKEN=",
+		"PUBLIC_PERSONAL_SECRET="+c.token,
+	)
 
 	out, err := cmd.Output()
 	if err != nil {

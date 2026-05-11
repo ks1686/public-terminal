@@ -44,10 +44,3 @@ var DefaultKeyMap = KeyMap{
 	NextAccount:   key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "next account")),
 	ManageAccts:   key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "manage accounts")),
 }
-
-// ShortHelp returns a terse key hint line for the footer.
-func (k KeyMap) ShortHelp() string {
-	return StyleKeyHint.Render(
-		"q quit  r refresh  b buy  s sell  c cancel  h history  l live  R rebalance  S settings  ctrl+a accounts",
-	)
-}

@@ -1,7 +1,6 @@
 package components
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -51,8 +50,7 @@ func (m *OrdersModel) FromPortfolio(p *api.Portfolio) {
 		}
 		amount := ""
 		if o.NotionalValue != nil {
-			f, _ := o.NotionalValue.Float64()
-			amount = fmt.Sprintf("$%.2f", f)
+			amount = formatMoney(*o.NotionalValue)
 		}
 		tRows = append(tRows, table.Row{sym, side, o.Type, o.Status, qty, amount})
 		ids = append(ids, o.OrderID)
@@ -86,13 +84,7 @@ func (m OrdersModel) Update(msg tea.Msg) (OrdersModel, tea.Cmd) {
 }
 
 func (m OrdersModel) ViewWithHeight(h int) string {
-	m.tbl.SetHeight(h - 2)
-	header := theme.PaneTitleAccent.Render(" OPEN ORDERS")
-	body := m.tbl.View()
-	if len(m.orderIDs) == 0 {
-		body = theme.Muted.Render("  No open orders.")
-	}
-	return strings.Join([]string{header, body}, "\n")
+	return renderTablePane(&m.tbl, h, theme.PaneTitleAccent.Render(" OPEN ORDERS"), "  No open orders.", len(m.orderIDs) == 0)
 }
 
 func sideStyle(side string) string {

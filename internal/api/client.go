@@ -116,13 +116,6 @@ func cmdLabel(args []string) string {
 	return strings.Join(args[:n], " ")
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Portfolio
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,22 +291,20 @@ func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, err
 	if err != nil {
 		return nil, err
 	}
-	// Try the session-partitioned shape first.
+	return parseBars(out)
+}
+
+func parseBars(out []byte) ([]Bar, error) {
 	var resp BarsResponse
-	respErr := json.Unmarshal(out, &resp)
-	if respErr == nil {
-		if flat := resp.Flatten(); len(flat) > 0 {
-			return flat, nil
+	if err := json.Unmarshal(out, &resp); err != nil {
+		var bars []Bar
+		if listErr := json.Unmarshal(out, &bars); listErr == nil {
+			return bars, nil
 		}
+		return nil, fmt.Errorf("parsing bars: %w\nraw: %.500s", err, out)
 	}
-	// Fallback: some endpoints may return a flat list.
-	var bars []Bar
-	if listErr := json.Unmarshal(out, &bars); listErr == nil {
-		return bars, nil
-	}
-	// Neither shape parsed — surface whichever error we have, with raw context.
-	if respErr != nil {
-		return nil, fmt.Errorf("parsing bars (session shape): %w\nraw: %.500s", respErr, out)
+	if flat := resp.Flatten(); len(flat) > 0 {
+		return flat, nil
 	}
 	return nil, fmt.Errorf("bars response had no points; raw: %.500s", out)
 }

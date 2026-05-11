@@ -32,10 +32,6 @@ var (
 			Foreground(ColorGray).
 			Padding(0, 1)
 
-	TableHeader = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(ColorCyan)
-
 	SelectedRow = lipgloss.NewStyle().
 			Background(lipgloss.Color("237")).
 			Foreground(ColorWhite)

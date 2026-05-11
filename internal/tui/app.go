@@ -235,9 +235,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.portfolio = msg.p
 		m.applyPortfolio()
-		// Auto-load chart on first portfolio load (when bars are empty); the
-		// holdings table is now populated so SelectedSymbol() returns the first
-		// row. Subsequent refreshes don't refetch chart data — use [/] to do it.
 		var cmd tea.Cmd
 		if len(m.chart.Bars) == 0 && !m.liveActive {
 			cmd = m.loadChartData()
@@ -288,8 +285,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Forward unrecognized messages (mostly nav keys) to the holdings table,
-	// which is the primary selection (matches Python's HoldingsTable focus).
 	var cmd tea.Cmd
 	m.holdings, cmd = m.holdings.Update(msg)
 	return m, cmd
@@ -378,15 +373,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spin.Tick, m.loadPortfolio(), m.loadRebalancerStatus())
 
 	case key.Matches(msg, km.Buy):
-		if client := m.activeClient(); client != nil {
-			m.modal = modals.NewOrderModal(client, "BUY", m.holdings.SelectedSymbol(), "EQUITY")
-		}
+		m.openOrderModal("BUY")
 		return m, nil
 
 	case key.Matches(msg, km.Sell):
-		if client := m.activeClient(); client != nil {
-			m.modal = modals.NewOrderModal(client, "SELL", m.holdings.SelectedSymbol(), "EQUITY")
-		}
+		m.openOrderModal("SELL")
 		return m, nil
 
 	case key.Matches(msg, km.Cancel):
@@ -420,16 +411,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, km.ChartPrev):
-		if m.chart.PeriodIdx > 0 {
+		// Only step the period when we can actually re-fetch — otherwise the
+		// period index drifts out of sync with the displayed bars.
+		if m.holdings.SelectedSymbol() != "" && m.chart.PeriodIdx > 0 {
 			m.chart.PeriodIdx--
+			return m, m.loadChartData()
 		}
-		return m, m.loadChartData()
+		return m, nil
 
 	case key.Matches(msg, km.ChartNext):
-		if m.chart.PeriodIdx < len(api.ChartPeriods)-1 {
+		if m.holdings.SelectedSymbol() != "" && m.chart.PeriodIdx < len(api.ChartPeriods)-1 {
 			m.chart.PeriodIdx++
+			return m, m.loadChartData()
 		}
-		return m, m.loadChartData()
+		return m, nil
 
 	case key.Matches(msg, km.SkipRebalance):
 		acct := m.activeAccount()
@@ -492,14 +487,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Pass remaining keys (arrow navigation, etc.) to holdings table.
 	var cmd tea.Cmd
 	m.holdings, cmd = m.holdings.Update(msg)
 	return m, cmd
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// View — matches Python TUI compose() layout exactly.
+// View
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
@@ -548,7 +542,6 @@ func (m Model) renderMain() string {
 
 	chart := m.chart.ViewWithHeight(chartH)
 
-	// Horizontal split — left 2fr, right 1fr.
 	leftW := (m.width * 2) / 3
 	rightW := m.width - leftW
 
@@ -649,6 +642,14 @@ func (m Model) renderOverlay() string {
 // ─────────────────────────────────────────────────────────────────────────────
 // Portfolio helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+func (m *Model) openOrderModal(side string) {
+	client := m.activeClient()
+	if client == nil {
+		return
+	}
+	m.modal = modals.NewOrderModal(client, side, m.holdings.SelectedSymbol(), "EQUITY")
+}
 
 func (m *Model) applyPortfolio() {
 	m.balance.FromPortfolio(m.portfolio, m.activeAccount())

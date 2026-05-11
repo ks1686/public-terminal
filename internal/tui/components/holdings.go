@@ -1,9 +1,7 @@
 package components
 
 import (
-	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,6 +49,18 @@ func defaultTableStyles() table.Styles {
 	return s
 }
 
+// renderTablePane renders a section title above the table body, or an
+// empty-state message when the table has no rows. The -2 accounts for the
+// title line + table header row inside the surrounding pane border.
+func renderTablePane(tbl *table.Model, h int, title, emptyMsg string, empty bool) string {
+	tbl.SetHeight(h - 2)
+	body := tbl.View()
+	if empty {
+		body = theme.Muted.Render(emptyMsg)
+	}
+	return title + "\n" + body
+}
+
 func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 	type rowData struct {
 		symbol string
@@ -72,8 +82,7 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 		}
 		last := ""
 		if pos.LastPrice != nil && pos.LastPrice.LastPrice != nil {
-			f, _ := pos.LastPrice.LastPrice.Float64()
-			last = fmt.Sprintf("$%.2f", f)
+			last = formatMoney(*pos.LastPrice.LastPrice)
 		}
 		dayPct := ""
 		if pos.PositionDailyGain != nil && pos.PositionDailyGain.GainPercentage != nil {
@@ -107,11 +116,5 @@ func (m HoldingsModel) Update(msg tea.Msg) (HoldingsModel, tea.Cmd) {
 }
 
 func (m HoldingsModel) ViewWithHeight(h int) string {
-	m.tbl.SetHeight(h - 2) // subtract header + border row
-	header := theme.PaneTitle.Render(" HOLDINGS")
-	body := m.tbl.View()
-	if len(m.rows) == 0 {
-		body = theme.Muted.Render("  No equity positions.")
-	}
-	return strings.Join([]string{header, body}, "\n")
+	return renderTablePane(&m.tbl, h, theme.PaneTitle.Render(" HOLDINGS"), "  No equity positions.", len(m.rows) == 0)
 }

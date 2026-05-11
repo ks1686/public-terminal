@@ -3,11 +3,9 @@ package components
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ks1686/public-terminal/internal/api"
 	"github.com/ks1686/public-terminal/internal/options"
@@ -35,18 +33,7 @@ func NewOptionsModel() OptionsModel {
 		table.WithFocused(true),
 		table.WithHeight(10),
 	)
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("8")).
-		BorderBottom(true).
-		Bold(true).
-		Foreground(lipgloss.Color("6"))
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("15")).
-		Background(lipgloss.Color("237")).
-		Bold(false)
-	t.SetStyles(s)
+	t.SetStyles(defaultTableStyles())
 	return OptionsModel{tbl: t}
 }
 
@@ -61,8 +48,7 @@ func (m *OptionsModel) FromPortfolio(p *api.Portfolio) {
 			f, _ := o.DailyGainPct.Float64()
 			dayPct = theme.FormatGain(f)
 		}
-		f, _ := o.CurrentValue.Float64()
-		val := fmt.Sprintf("$%.2f", f)
+		val := formatMoney(o.CurrentValue)
 
 		dteStyle := theme.Muted
 		if o.IsNearExpiry() {
@@ -92,11 +78,5 @@ func (m OptionsModel) Update(msg tea.Msg) (OptionsModel, tea.Cmd) {
 }
 
 func (m OptionsModel) ViewWithHeight(h int) string {
-	m.tbl.SetHeight(h - 2)
-	header := theme.PaneTitle.Render(" OPTIONS")
-	body := m.tbl.View()
-	if len(m.rows) == 0 {
-		body = theme.Muted.Render("  No option positions.")
-	}
-	return strings.Join([]string{header, body}, "\n")
+	return renderTablePane(&m.tbl, h, theme.PaneTitle.Render(" OPTIONS"), "  No option positions.", len(m.rows) == 0)
 }

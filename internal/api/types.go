@@ -147,17 +147,43 @@ type Quote struct {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Historic bars
+//
+// The CLI returns bars partitioned into three market sessions:
+//   { "symbol": "...", "period": "...",
+//     "preMarket":     { "expectedBars": N, "bars": [...] },
+//     "regularMarket": { "expectedBars": N, "bars": [...] },
+//     "afterMarket":   { "expectedBars": N, "bars": [...] } }
+// We flatten them chronologically for charting.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Bar struct {
-	Timestamp int64   `json:"timestamp"` // unix seconds
+	Timestamp string  `json:"timestamp"` // ISO 8601
 	Open      float64 `json:"open"`
 	High      float64 `json:"high"`
 	Low       float64 `json:"low"`
 	Close     float64 `json:"close"`
-	Volume    float64 `json:"volume"`
+	Value     float64 `json:"value"`
+	Volume    int64   `json:"volume"`
+}
+
+type marketSessionBars struct {
+	Bars []Bar `json:"bars"`
 }
 
 type BarsResponse struct {
-	Bars []Bar `json:"bars"`
+	Symbol        string            `json:"symbol"`
+	Period        string            `json:"period"`
+	PreMarket     marketSessionBars `json:"preMarket"`
+	RegularMarket marketSessionBars `json:"regularMarket"`
+	AfterMarket   marketSessionBars `json:"afterMarket"`
+}
+
+// Flatten returns all bars across sessions in chronological order
+// (pre-market → regular → after-market).
+func (b BarsResponse) Flatten() []Bar {
+	out := make([]Bar, 0, len(b.PreMarket.Bars)+len(b.RegularMarket.Bars)+len(b.AfterMarket.Bars))
+	out = append(out, b.PreMarket.Bars...)
+	out = append(out, b.RegularMarket.Bars...)
+	out = append(out, b.AfterMarket.Bars...)
+	return out
 }

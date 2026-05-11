@@ -185,9 +185,8 @@ func (m *Model) loadChartData() tea.Cmd {
 	}
 	sym := m.holdings.SelectedSymbol()
 	if sym == "" {
-		return func() tea.Msg {
-			return appErrMsg{err: fmt.Errorf("select a holding first"), ctx: "chart"}
-		}
+		// No holdings yet — silently skip; chart shows its own empty-state.
+		return nil
 	}
 	p := api.ChartPeriods[m.chart.PeriodIdx]
 	return func() tea.Msg {
@@ -236,7 +235,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.portfolio = msg.p
 		m.applyPortfolio()
-		return m, nil
+		// Auto-load chart on first portfolio load (when bars are empty); the
+		// holdings table is now populated so SelectedSymbol() returns the first
+		// row. Subsequent refreshes don't refetch chart data — use [/] to do it.
+		var cmd tea.Cmd
+		if len(m.chart.Bars) == 0 && !m.liveActive {
+			cmd = m.loadChartData()
+		}
+		return m, cmd
 
 	case historyLoadedMsg:
 		m.modal = modals.NewHistoryModal(msg.entries, m.width, m.height)

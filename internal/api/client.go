@@ -290,21 +290,25 @@ type ChartPeriod struct {
 }
 
 func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, error) {
-	args := []string{"historicdata", "bars", symbol, period}
+	args := []string{"historicdata", "bars", strings.ToUpper(symbol), strings.ToUpper(period)}
 	if aggregation != "" {
-		args = append(args, "--aggregation", aggregation)
+		args = append(args, "--aggregation", strings.ToUpper(aggregation))
 	}
 	out, err := c.run(30*time.Second, args...)
 	if err != nil {
 		return nil, err
 	}
 	var resp BarsResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		var bars []Bar
-		if err2 := json.Unmarshal(out, &bars); err2 != nil {
-			return nil, fmt.Errorf("parsing bars: %w", err)
+	if err := json.Unmarshal(out, &resp); err == nil {
+		flat := resp.Flatten()
+		if len(flat) > 0 {
+			return flat, nil
 		}
-		return bars, nil
 	}
-	return resp.Bars, nil
+	// Fallback: some endpoints may return a flat list.
+	var bars []Bar
+	if err := json.Unmarshal(out, &bars); err != nil {
+		return nil, fmt.Errorf("parsing bars: %w\nraw: %.200s", err, out)
+	}
+	return bars, nil
 }

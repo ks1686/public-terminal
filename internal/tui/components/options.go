@@ -14,13 +14,12 @@ import (
 	"github.com/ks1686/public-terminal/internal/tui/theme"
 )
 
-// OptionsModel renders the options positions table.
 type OptionsModel struct {
 	tbl  table.Model
 	rows []table.Row
 }
 
-func NewOptionsModel(width, height int) OptionsModel {
+func NewOptionsModel() OptionsModel {
 	cols := []table.Column{
 		{Title: "Symbol", Width: 22},
 		{Title: "Type", Width: 6},
@@ -33,8 +32,8 @@ func NewOptionsModel(width, height int) OptionsModel {
 	}
 	t := table.New(
 		table.WithColumns(cols),
-		table.WithFocused(false),
-		table.WithHeight(height),
+		table.WithFocused(true),
+		table.WithHeight(10),
 	)
 	s := table.DefaultStyles()
 	s.Header = s.Header.
@@ -92,8 +91,9 @@ func (m OptionsModel) Update(msg tea.Msg) (OptionsModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m OptionsModel) View() string {
-	header := theme.TableHeader.Render(" Options")
+func (m OptionsModel) ViewWithHeight(h int) string {
+	m.tbl.SetHeight(h - 2)
+	header := theme.PaneTitle.Render(" OPTIONS")
 	body := m.tbl.View()
 	if len(m.rows) == 0 {
 		body = theme.Muted.Render("  No option positions.")

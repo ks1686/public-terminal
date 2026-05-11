@@ -30,9 +30,7 @@ type livePoint struct {
 	v float64
 }
 
-func NewChartModel(width, height int) ChartModel {
-	return ChartModel{Width: width, Height: height}
-}
+func NewChartModel() ChartModel { return ChartModel{} }
 
 // AppendLivePoint adds a portfolio equity value. Must be called from the Update loop.
 func (m *ChartModel) AppendLivePoint(equity decimal.Decimal) {
@@ -59,7 +57,10 @@ func (m ChartModel) PeriodLabel() string {
 	return ""
 }
 
-func (m ChartModel) View() string {
+// ViewWithHeight renders at the supplied height. Width must be set externally
+// via the public Width field (mirrors BalanceModel / RebalancerModel).
+func (m ChartModel) ViewWithHeight(h int) string {
+	m.Height = h
 	if m.Live {
 		return m.viewLive()
 	}
@@ -75,7 +76,7 @@ func (m ChartModel) viewLive() string {
 		data[i] = p.v
 	}
 	title := theme.Title.Render("Portfolio — LIVE")
-	return title + "\n" + renderGraph(data, m.Width, m.Height)
+	return title + "\n" + renderGraph(data, m.Width, m.Height-1)
 }
 
 func (m ChartModel) viewHistoric() string {

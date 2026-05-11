@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ks1686/public-terminal/internal/api"
 	"github.com/ks1686/public-terminal/internal/tui/theme"
@@ -18,33 +17,21 @@ type OrdersModel struct {
 	orderIDs []string
 }
 
-func NewOrdersModel(width, height int) OrdersModel {
+func NewOrdersModel() OrdersModel {
 	cols := []table.Column{
 		{Title: "Symbol", Width: 8},
 		{Title: "Side", Width: 6},
-		{Title: "Type", Width: 12},
-		{Title: "Status", Width: 18},
-		{Title: "Qty", Width: 12},
-		{Title: "Amount", Width: 12},
-		{Title: "Limit", Width: 10},
+		{Title: "Type", Width: 10},
+		{Title: "Status", Width: 14},
+		{Title: "Qty", Width: 10},
+		{Title: "Amount", Width: 10},
 	}
 	t := table.New(
 		table.WithColumns(cols),
 		table.WithFocused(true),
-		table.WithHeight(height),
+		table.WithHeight(10),
 	)
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("8")).
-		BorderBottom(true).
-		Bold(true).
-		Foreground(lipgloss.Color("6"))
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("15")).
-		Background(lipgloss.Color("237")).
-		Bold(false)
-	t.SetStyles(s)
+	t.SetStyles(defaultTableStyles())
 	return OrdersModel{tbl: t}
 }
 
@@ -67,12 +54,7 @@ func (m *OrdersModel) FromPortfolio(p *api.Portfolio) {
 			f, _ := o.NotionalValue.Float64()
 			amount = fmt.Sprintf("$%.2f", f)
 		}
-		limit := ""
-		if o.LimitPrice != nil {
-			f, _ := o.LimitPrice.Float64()
-			limit = fmt.Sprintf("$%.2f", f)
-		}
-		tRows = append(tRows, table.Row{sym, side, o.Type, o.Status, qty, amount, limit})
+		tRows = append(tRows, table.Row{sym, side, o.Type, o.Status, qty, amount})
 		ids = append(ids, o.OrderID)
 	}
 
@@ -103,8 +85,9 @@ func (m OrdersModel) Update(msg tea.Msg) (OrdersModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m OrdersModel) View() string {
-	header := theme.TableHeader.Render(" Open Orders")
+func (m OrdersModel) ViewWithHeight(h int) string {
+	m.tbl.SetHeight(h - 2)
+	header := theme.PaneTitleAccent.Render(" OPEN ORDERS")
 	body := m.tbl.View()
 	if len(m.orderIDs) == 0 {
 		body = theme.Muted.Render("  No open orders.")

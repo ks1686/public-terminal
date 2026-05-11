@@ -19,26 +19,21 @@ type HoldingsModel struct {
 	rows []table.Row
 }
 
-func NewHoldingsModel(width, height int) HoldingsModel {
-	cols := makeHoldingsCols(width)
+func NewHoldingsModel() HoldingsModel {
+	cols := []table.Column{
+		{Title: "Symbol", Width: 10},
+		{Title: "Qty", Width: 14},
+		{Title: "Value", Width: 14},
+		{Title: "Last", Width: 12},
+		{Title: "Day %", Width: 10},
+	}
 	t := table.New(
 		table.WithColumns(cols),
 		table.WithFocused(true),
-		table.WithHeight(height),
+		table.WithHeight(10),
 	)
 	t.SetStyles(defaultTableStyles())
 	return HoldingsModel{tbl: t}
-}
-
-func makeHoldingsCols(width int) []table.Column {
-	_ = width
-	return []table.Column{
-		{Title: "Symbol", Width: 8},
-		{Title: "Qty", Width: 12},
-		{Title: "Value", Width: 12},
-		{Title: "Last", Width: 10},
-		{Title: "Day %", Width: 10},
-	}
 }
 
 func defaultTableStyles() table.Styles {
@@ -111,8 +106,9 @@ func (m HoldingsModel) Update(msg tea.Msg) (HoldingsModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m HoldingsModel) View() string {
-	header := theme.TableHeader.Render(" Holdings")
+func (m HoldingsModel) ViewWithHeight(h int) string {
+	m.tbl.SetHeight(h - 2) // subtract header + border row
+	header := theme.PaneTitle.Render(" HOLDINGS")
 	body := m.tbl.View()
 	if len(m.rows) == 0 {
 		body = theme.Muted.Render("  No equity positions.")

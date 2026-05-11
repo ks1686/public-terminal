@@ -124,7 +124,9 @@ func (m Model) Init() tea.Cmd {
 func (m *Model) loadPortfolio() tea.Cmd {
 	client := m.activeClient()
 	if client == nil {
-		return nil
+		return func() tea.Msg {
+			return appErrMsg{err: fmt.Errorf("public CLI not found or no account configured — press ctrl+a to set up"), ctx: "client"}
+		}
 	}
 	return func() tea.Msg {
 		p, err := client.GetPortfolio()
@@ -487,8 +489,12 @@ func (m Model) View() string {
 
 func (m Model) renderMain() string {
 	if m.loading {
+		status := ""
+		if m.status != "" {
+			status = "\n" + m.renderStatus()
+		}
 		return m.balance.View() + "\n" +
-			"\n" + m.spin.View() + " Loading…\n"
+			"\n" + m.spin.View() + " Loading…" + status + "\n"
 	}
 
 	mainHeight := m.height - 3 // balance + rebalancer + status bars

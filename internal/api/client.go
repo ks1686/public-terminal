@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,14 +37,16 @@ func resolveBin() (string, error) {
 	}
 	candidates := []string{
 		filepath.Join(homeDir(), ".local", "bin", "public"),
+		filepath.Join(homeDir(), ".local", "bin", "public.exe"),
 		"/usr/local/bin/public",
+		"/opt/homebrew/bin/public",
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("public CLI binary not found; run: uv tool install publicdotcom-cli")
+	return "", fmt.Errorf("public CLI not found; install with: uv tool install publicdotcom-cli")
 }
 
 func homeDir() string {
@@ -57,6 +60,7 @@ func readTokenFromEnv(envFile string) string {
 		return os.Getenv("PUBLIC_ACCESS_TOKEN")
 	}
 	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "PUBLIC_ACCESS_TOKEN=") {
 			return strings.TrimPrefix(line, "PUBLIC_ACCESS_TOKEN=")
 		}
@@ -64,24 +68,41 @@ func readTokenFromEnv(envFile string) string {
 	return os.Getenv("PUBLIC_ACCESS_TOKEN")
 }
 
-// run executes: public [globalFlags...] subcommand [args...]
-// Returns stdout bytes; returns error with stderr message on failure.
-func (c *Client) run(args ...string) ([]byte, error) {
-	global := []string{"--json"}
-	if c.token != "" {
-		global = append(global, "--token", c.token)
-	}
-	cmdArgs := append(global, args...)
-	cmd := exec.Command(c.bin, cmdArgs...)
-	cmd.Env = append(os.Environ(), "PUBLIC_ACCESS_TOKEN="+c.token)
+// run executes: public <args...>
+// --json is passed as part of args by each caller (it is a per-subcommand flag).
+// The token is injected via PUBLIC_ACCESS_TOKEN env var.
+func (c *Client) run(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	// Inject token via env var; the CLI reads PUBLIC_ACCESS_TOKEN automatically.
+	env := append(os.Environ(), "PUBLIC_ACCESS_TOKEN="+c.token)
+	cmd.Env = env
+
 	out, err := cmd.Output()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("public %s: %s", strings.Join(args[:min(2, len(args))], " "), strings.TrimSpace(string(ee.Stderr)))
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("public %s: timed out after %v", cmdLabel(args), timeout)
 		}
-		return nil, err
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr := strings.TrimSpace(string(ee.Stderr))
+			if stderr != "" {
+				return nil, fmt.Errorf("public %s: %s", cmdLabel(args), stderr)
+			}
+			return nil, fmt.Errorf("public %s: exit %d", cmdLabel(args), ee.ExitCode())
+		}
+		return nil, fmt.Errorf("public %s: %w", cmdLabel(args), err)
 	}
 	return out, nil
+}
+
+func cmdLabel(args []string) string {
+	n := 2
+	if len(args) < n {
+		n = len(args)
+	}
+	return strings.Join(args[:n], " ")
 }
 
 func min(a, b int) int {
@@ -96,13 +117,13 @@ func min(a, b int) int {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Client) GetPortfolio() (*Portfolio, error) {
-	out, err := c.run("portfolio", "show", "-a", c.accountID)
+	out, err := c.run(30*time.Second, "portfolio", "show", "--json", "-a", c.accountID)
 	if err != nil {
 		return nil, err
 	}
 	var p Portfolio
 	if err := json.Unmarshal(out, &p); err != nil {
-		return nil, fmt.Errorf("parsing portfolio: %w", err)
+		return nil, fmt.Errorf("parsing portfolio JSON: %w\nraw: %.200s", err, out)
 	}
 	return &p, nil
 }
@@ -122,17 +143,17 @@ func (c *Client) PlaceOrder(req OrderRequest) error {
 		return err
 	}
 	f.Close()
-	_, err = c.run("order", "place", "-f", f.Name(), "-y", "-a", c.accountID)
+	_, err = c.run(30*time.Second, "order", "place", "-f", f.Name(), "-y", "-a", c.accountID)
 	return err
 }
 
 func (c *Client) CancelOrder(orderID string) error {
-	_, err := c.run("order", "cancel", orderID, "-y", "-a", c.accountID)
+	_, err := c.run(30*time.Second, "order", "cancel", orderID, "-y", "-a", c.accountID)
 	return err
 }
 
 func (c *Client) GetOrder(orderID string) (*Order, error) {
-	out, err := c.run("order", "get", orderID, "-a", c.accountID)
+	out, err := c.run(30*time.Second, "order", "get", orderID, "--json", "-a", c.accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -148,23 +169,22 @@ func (c *Client) GetOrder(orderID string) (*Order, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Client) ListHistory(pageSize int) ([]HistoryEntry, error) {
-	// Fetch up to 90 days
 	end := time.Now()
 	start := end.AddDate(0, 0, -90)
 	args := []string{
 		"history", "list",
+		"--json",
 		"-a", c.accountID,
 		"--start", start.Format(time.RFC3339),
 		"--end", end.Format(time.RFC3339),
 		"--page-size", fmt.Sprintf("%d", pageSize),
 	}
-	out, err := c.run(args...)
+	out, err := c.run(30*time.Second, args...)
 	if err != nil {
 		return nil, err
 	}
 	var resp HistoryResponse
 	if err := json.Unmarshal(out, &resp); err != nil {
-		// Might be a bare array
 		var items []HistoryEntry
 		if err2 := json.Unmarshal(out, &items); err2 != nil {
 			return nil, fmt.Errorf("parsing history: %w", err)
@@ -179,7 +199,7 @@ func (c *Client) ListHistory(pageSize int) ([]HistoryEntry, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Client) GetInstrument(symbol, instrType string) (*InstrumentDetail, error) {
-	out, err := c.run("instruments", "get", strings.ToUpper(symbol), strings.ToUpper(instrType))
+	out, err := c.run(15*time.Second, "instruments", "get", strings.ToUpper(symbol), strings.ToUpper(instrType), "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +211,8 @@ func (c *Client) GetInstrument(symbol, instrType string) (*InstrumentDetail, err
 }
 
 func (c *Client) ListTradableInstruments(instrType, tradingFilter string) ([]InstrumentDetail, error) {
-	out, err := c.run("instruments", "list",
+	out, err := c.run(60*time.Second, "instruments", "list",
+		"--json",
 		"--type-filter", strings.ToUpper(instrType),
 		"--trading-filter", tradingFilter,
 	)
@@ -213,8 +234,8 @@ func (c *Client) GetQuotes(symbols []string, instrType string) ([]Quote, error) 
 	if len(symbols) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"market", "quotes", "--type", instrType}, symbols...)
-	out, err := c.run(args...)
+	args := append([]string{"market", "quotes", "--json", "--type", instrType}, symbols...)
+	out, err := c.run(15*time.Second, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,17 +281,16 @@ type ChartPeriod struct {
 }
 
 func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, error) {
-	args := []string{"historicdata", "bars", symbol, period}
+	args := []string{"historicdata", "bars", symbol, period, "--json"}
 	if aggregation != "" {
 		args = append(args, "--aggregation", aggregation)
 	}
-	out, err := c.run(args...)
+	out, err := c.run(30*time.Second, args...)
 	if err != nil {
 		return nil, err
 	}
 	var resp BarsResponse
 	if err := json.Unmarshal(out, &resp); err != nil {
-		// Try bare array
 		var bars []Bar
 		if err2 := json.Unmarshal(out, &bars); err2 != nil {
 			return nil, fmt.Errorf("parsing bars: %w", err)

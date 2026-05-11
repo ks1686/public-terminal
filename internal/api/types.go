@@ -156,14 +156,17 @@ type Quote struct {
 // We flatten them chronologically for charting.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Bar holds OHLC + volume for one historicdata interval. The API returns
+// decimal prices as JSON strings (e.g. "293.05"), so decimal.Decimal is used
+// for the price fields — it accepts both string and number JSON encodings.
 type Bar struct {
-	Timestamp string  `json:"timestamp"` // ISO 8601
-	Open      float64 `json:"open"`
-	High      float64 `json:"high"`
-	Low       float64 `json:"low"`
-	Close     float64 `json:"close"`
-	Value     float64 `json:"value"`
-	Volume    int64   `json:"volume"`
+	Timestamp string          `json:"timestamp"` // ISO 8601
+	Open      decimal.Decimal `json:"open"`
+	High      decimal.Decimal `json:"high"`
+	Low       decimal.Decimal `json:"low"`
+	Close     decimal.Decimal `json:"close"`
+	Value     decimal.Decimal `json:"value"`
+	Volume    int64           `json:"volume"`
 }
 
 type marketSessionBars struct {

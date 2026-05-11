@@ -96,7 +96,8 @@ func (m ChartModel) viewHistoric() string {
 
 	data := make([]float64, len(m.Bars))
 	for i, b := range m.Bars {
-		data[i] = b.Close
+		f, _ := b.Close.Float64()
+		data[i] = f
 	}
 
 	sym := m.Symbol

@@ -68,14 +68,16 @@ func readTokenFromEnv(envFile string) string {
 	return os.Getenv("PUBLIC_ACCESS_TOKEN")
 }
 
-// run executes: public <args...>
-// --json is passed as part of args by each caller (it is a per-subcommand flag).
+// run executes: public --json <args...>
+// --json is a root-level flag in the publicdotcom-cli (declared on app.callback()),
+// so it must come BEFORE the subcommand, not after.
 // The token is injected via PUBLIC_ACCESS_TOKEN env var.
 func (c *Client) run(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.bin, args...)
+	fullArgs := append([]string{"--json"}, args...)
+	cmd := exec.CommandContext(ctx, c.bin, fullArgs...)
 	// Inject token via env var; the CLI reads PUBLIC_ACCESS_TOKEN automatically.
 	env := append(os.Environ(), "PUBLIC_ACCESS_TOKEN="+c.token)
 	cmd.Env = env
@@ -117,7 +119,7 @@ func min(a, b int) int {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Client) GetPortfolio() (*Portfolio, error) {
-	out, err := c.run(30*time.Second, "portfolio", "show", "--json", "-a", c.accountID)
+	out, err := c.run(30*time.Second, "portfolio", "show", "-a", c.accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +155,7 @@ func (c *Client) CancelOrder(orderID string) error {
 }
 
 func (c *Client) GetOrder(orderID string) (*Order, error) {
-	out, err := c.run(30*time.Second, "order", "get", orderID, "--json", "-a", c.accountID)
+	out, err := c.run(30*time.Second, "order", "get", orderID, "-a", c.accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +175,6 @@ func (c *Client) ListHistory(pageSize int) ([]HistoryEntry, error) {
 	start := end.AddDate(0, 0, -90)
 	args := []string{
 		"history", "list",
-		"--json",
 		"-a", c.accountID,
 		"--start", start.Format(time.RFC3339),
 		"--end", end.Format(time.RFC3339),
@@ -199,7 +200,7 @@ func (c *Client) ListHistory(pageSize int) ([]HistoryEntry, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Client) GetInstrument(symbol, instrType string) (*InstrumentDetail, error) {
-	out, err := c.run(15*time.Second, "instruments", "get", strings.ToUpper(symbol), strings.ToUpper(instrType), "--json")
+	out, err := c.run(15*time.Second, "instruments", "get", strings.ToUpper(symbol), strings.ToUpper(instrType))
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +213,6 @@ func (c *Client) GetInstrument(symbol, instrType string) (*InstrumentDetail, err
 
 func (c *Client) ListTradableInstruments(instrType, tradingFilter string) ([]InstrumentDetail, error) {
 	out, err := c.run(60*time.Second, "instruments", "list",
-		"--json",
 		"--type-filter", strings.ToUpper(instrType),
 		"--trading-filter", tradingFilter,
 	)
@@ -234,7 +234,7 @@ func (c *Client) GetQuotes(symbols []string, instrType string) ([]Quote, error) 
 	if len(symbols) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"market", "quotes", "--json", "--type", instrType}, symbols...)
+	args := append([]string{"market", "quotes", "--type", instrType}, symbols...)
 	out, err := c.run(15*time.Second, args...)
 	if err != nil {
 		return nil, err
@@ -281,7 +281,7 @@ type ChartPeriod struct {
 }
 
 func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, error) {
-	args := []string{"historicdata", "bars", symbol, period, "--json"}
+	args := []string{"historicdata", "bars", symbol, period}
 	if aggregation != "" {
 		args = append(args, "--aggregation", aggregation)
 	}

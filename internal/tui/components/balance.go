@@ -2,7 +2,6 @@ package components
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shopspring/decimal"
@@ -62,8 +61,7 @@ func (m BalanceModel) View() string {
 	if width < 20 {
 		width = 20
 	}
-	contentW := max(1, width-4)
-	boxW := max(1, width-2)
+	innerW := max(1, width-4) // inside the rounded border
 
 	title := theme.Muted.Render("PORTFOLIO EQUITY")
 
@@ -75,30 +73,44 @@ func (m BalanceModel) View() string {
 	daily := fmt.Sprintf("%s (%s)", gainStr, gainAmt)
 
 	top := lipgloss.JoinVertical(lipgloss.Center, title, eq, daily)
-	top = lipgloss.NewStyle().Width(contentW).Align(lipgloss.Center).Render(top)
+	top = lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Render(top)
 
-	sep := theme.Muted.Render("  │  ")
-	bp := fmt.Sprintf("BP %s", formatMoney(m.BuyingPower))
-	optBP := fmt.Sprintf("OPT BP %s", formatMoney(m.OptionsBP))
-	cBP := fmt.Sprintf("CRYPTO BP %s", formatMoney(m.CryptoBP))
-
+	// Build the stats row — use JoinHorizontal to handle ANSI widths properly.
+	items := []string{
+		fmt.Sprintf("BP %s", formatMoney(m.BuyingPower)),
+		fmt.Sprintf("OPT BP %s", formatMoney(m.OptionsBP)),
+		fmt.Sprintf("CRYPTO BP %s", formatMoney(m.CryptoBP)),
+	}
 	cashLabel := "CASH"
 	cashValue := formatMoney(m.Cash)
 	if m.Cash.IsNegative() {
 		cashLabel = "MARGIN"
 		cashValue = theme.Warning.Render(formatMoney(m.Cash.Neg()))
 	}
-	cash := fmt.Sprintf("%s %s", cashLabel, cashValue)
+	items = append(items, fmt.Sprintf("%s %s", cashLabel, cashValue))
 
-	parts := []string{bp, optBP, cBP, cash}
-	bottom := strings.Join(parts, sep)
-	bottom = lipgloss.NewStyle().Width(contentW).Align(lipgloss.Center).Foreground(theme.ColorGray).Render(bottom)
+	sep := theme.Muted.Render(" │ ")
 
-	// Combine into a box
+	// Try fitting all 4 on one line; fall back to 2×2 if too wide.
+	row1 := lipgloss.JoinHorizontal(lipgloss.Left,
+		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[0]),
+		sep,
+		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[1]),
+	)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Left,
+		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[2]),
+		sep,
+		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[3]),
+	)
+	bottom := lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Foreground(theme.ColorGray).Render(row1),
+		lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Foreground(theme.ColorGray).Render(row2),
+	)
+
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.ColorCyan).
-		Width(boxW). // Account for borders
+		Width(max(1, width-2)).
 		Render(lipgloss.JoinVertical(lipgloss.Center, top, "", bottom))
 
 	return box

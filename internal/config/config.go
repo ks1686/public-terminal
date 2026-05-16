@@ -142,7 +142,7 @@ func LoadRebalanceConfig(accountID string) RebalanceConfig {
 		Index:            "SP500",
 		TopN:             500,
 		MarginUsagePct:   0.5,
-		RebalanceEnabled: true,
+		RebalanceEnabled: false,
 		Allocations:      DefaultAllocations,
 	}
 	b, err := os.ReadFile(RebalanceConfigPath(accountID))

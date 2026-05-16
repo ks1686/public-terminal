@@ -6,41 +6,24 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  PYTHON_VERSION: "3.12"
-
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
 
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: go build ./...
 
-      - name: Install dependencies
-        run: uv sync --all-groups
+      - run: go vet ./...
 
-      - name: Run Ruff Linting
-        run: uv run ruff check .
+      - run: go test ./... -v -race -coverprofile=coverage.out
 
-      - name: Run Bandit Security Scan
-        run: uv run bandit -r . -c "pyproject.toml" -ll -ii
-
-      - name: Compile check
-        run: |
-          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py test_config.py test_app.py
-
-      - name: Import smoke check
-        run: |
-          uv run python -c "import app, client, config, main, modals, rebalance, widgets"
-
-      - name: Run Pytest with Coverage
-        run: uv run pytest --cov=. --cov-report=xml --cov-report=term-missing -v
-        env:
-          PUBLIC_ACCESS_TOKEN: "mock_token_for_tests"
-          PUBLIC_ACCOUNT_NUMBER: "mock_account_for_tests"
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out

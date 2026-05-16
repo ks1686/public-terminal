@@ -9,51 +9,42 @@ on:
 permissions:
   contents: write
 
-env:
-  PYTHON_VERSION: "3.12"
-
 jobs:
   quality:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
 
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: go build ./...
 
-      - name: Install dependencies
-        run: uv sync --all-groups
+      - run: go vet ./...
 
-      - name: Run Ruff Linting
-        run: uv run ruff check .
-
-      - name: Run Bandit Security Scan
-        run: uv run bandit -r . -c "pyproject.toml" -ll -ii
-
-      - name: Compile check
-        run: |
-          uv run python -m compileall app.py config.py widgets.py modals.py rebalance.py main.py client.py test_audit.py test_rebalance.py test_config.py test_app.py
-
-      - name: Import smoke check
-        run: |
-          uv run python -c "import app, client, config, main, modals, rebalance, widgets"
-
-      - name: Unit tests
-        run: |
-          uv run python -m unittest discover -v -p "test_*.py"
+      - run: go test ./... -race
 
   build-binaries:
     needs: quality
     strategy:
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
             asset_name: public-terminal-linux-x86_64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            asset_name: public-terminal-linux-arm64
           - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            asset_name: public-terminal-macos-x86_64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
             asset_name: public-terminal-macos-arm64
 
     runs-on: ${{ matrix.os }}
@@ -61,21 +52,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: uv sync --all-groups
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
 
       - name: Build binary
         run: |
-          uv run pyinstaller \
-            --onefile \
-            --name public-terminal \
-            main.py
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -o dist/public-terminal ./cmd/public-terminal
 
       - name: Package release artifact
         shell: bash
@@ -93,36 +77,9 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}.tar.gz
 
-  build-python-package:
-    needs: quality
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
-      - name: Build wheel and sdist
-        run: uv build
-
-      - name: Upload Python package artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-package
-          path: |
-            dist/*.whl
-            dist/*.tar.gz
-
   release:
-    needs:
-      - build-binaries
-      - build-python-package
+    needs: build-binaries
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -131,21 +88,10 @@ jobs:
         with:
           path: dist/
 
-      - name: Create stable latest sdist asset
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdist_path="$(find dist -type f -name 'public_terminal-*.tar.gz' | sort | head -n 1)"
-          if [ -z "$sdist_path" ]; then
-            echo "No sdist artifact found"
-            exit 1
-          fi
-          cp "$sdist_path" dist/public_terminal-latest.tar.gz
-
       - name: Generate SHA256 checksums
         shell: bash
         run: |
-          find dist -type f \( -name "*.tar.gz" -o -name "*.whl" \) -print0 \
+          find dist -type f -name "*.tar.gz" -print0 \
             | sort -z \
             | xargs -0 sha256sum > dist/SHA256SUMS.txt
 
@@ -155,24 +101,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/**/*.tar.gz
-            dist/**/*.whl
             dist/SHA256SUMS.txt
-
-  publish-pypi:
-    needs: build-python-package
-    if: ${{ vars.PUBLISH_PYPI == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download Python package artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package
-          path: dist/publish
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/publish

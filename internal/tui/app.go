@@ -647,22 +647,19 @@ func (m Model) renderMain() string {
 
 	topH, bottomH := splitMainHeights(mainH)
 
-	topLeft := m.renderHoldingsPane(leftW, topH)
-	topRight := m.renderCryptoPane(rightW, topH)
-	bottomLeft := m.renderOptionsPane(leftW, bottomH)
-	bottomRight := m.renderOrdersPane(rightW, bottomH)
+	_ = m.renderHoldingsPane(leftW, topH)
+	_ = m.renderCryptoPane(rightW, topH)
+	_ = m.renderOptionsPane(leftW, bottomH)
+	_ = m.renderOrdersPane(rightW, bottomH)
 
 	if m.loading {
-		topLeft = m.renderLoadingPane(leftW, topH, theme.PaneStocks, theme.PaneTitleStocks.Render(" STOCKS"), "Loading stocks…")
-		topRight = m.renderLoadingPane(rightW, topH, theme.PaneCrypto, theme.PaneTitleCrypto.Render(" CRYPTO"), "Loading crypto…")
-		bottomLeft = m.renderLoadingPane(leftW, bottomH, theme.PaneOptions, theme.PaneTitleOptions.Render(" OPTIONS"), "Loading options…")
-		bottomRight = m.renderLoadingPane(rightW, bottomH, theme.PaneOrders, theme.PaneTitleOrders.Render(" OPEN ORDERS"), "Loading open orders…")
+		_ = m.renderLoadingPane(leftW, topH, theme.PaneStocks, theme.PaneTitleStocks.Render(" STOCKS"), "Loading stocks…")
+		_ = m.renderLoadingPane(rightW, topH, theme.PaneCrypto, theme.PaneTitleCrypto.Render(" CRYPTO"), "Loading crypto…")
+		_ = m.renderLoadingPane(leftW, bottomH, theme.PaneOptions, theme.PaneTitleOptions.Render(" OPTIONS"), "Loading options…")
+		_ = m.renderLoadingPane(rightW, bottomH, theme.PaneOrders, theme.PaneTitleOrders.Render(" OPEN ORDERS"), "Loading open orders…")
 	}
 
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeft, topRight)
-	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, bottomLeft, bottomRight)
-
-	return "LINE1\nLINE2\nLINE3\nLINE4\n" + topRow + "\n" + bottomRow + "\n" + status + "\n" + footer
+	return "LINE1\nLINE2\nLINE3\nLINE4\n" + accountBar + "\n" + balance + "\n" + rebal + "\n" + status + "\n" + footer
 }
 
 func (m Model) renderAccountTabs() string {

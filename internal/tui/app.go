@@ -642,9 +642,7 @@ func (m Model) renderMain() string {
 
 	_, mainH, leftW, rightW := m.layoutDims(accountBar, balance, rebal, status, footer)
 	if mainH < 16 || leftW < 20 || rightW < 20 {
-		return lipgloss.JoinVertical(lipgloss.Left,
-			accountBar, balance, rebal, status, footer,
-		)
+		return "═══ " + accountBar + " ═══\n" + balance + "\n" + rebal + "\n" + status + "\n" + footer
 	}
 
 	topH, bottomH := splitMainHeights(mainH)
@@ -663,11 +661,8 @@ func (m Model) renderMain() string {
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeft, topRight)
 	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, bottomLeft, bottomRight)
-	mainGrid := lipgloss.JoinVertical(lipgloss.Left, topRow, bottomRow)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		accountBar, balance, rebal, mainGrid, status, footer,
-	)
+	return "═══ " + accountBar + " ═══\n" + balance + "\n" + rebal + "\n" + topRow + "\n" + bottomRow + "\n" + status + "\n" + footer
 }
 
 func (m Model) renderAccountTabs() string {

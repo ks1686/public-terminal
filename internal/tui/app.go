@@ -276,7 +276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case rebalancerRunningMsg:
 		m.rebalancerRunning = false
-		m.rebalancer.Status.Active = false
+		m.rebalancer.Status.SvcActive = false
 		m.rebalancer.Status.LastRun = time.Now().Format("15:04:05")
 		return m, m.loadPortfolio()
 
@@ -293,11 +293,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebalanceCfg = msg.cfg
 		m.skipPending = msg.skipPending
 		m.rebalancer.Status.Cfg = msg.cfg
-		// Enabled in the bar means "scheduled in systemd". The Cfg-level
-		// RebalanceEnabled flag is a soft skip controlled by the modal.
-		m.rebalancer.Status.Enabled = msg.enabled && msg.cfg.RebalanceEnabled
+		m.rebalancer.Status.SvcInstalled = msg.enabled || msg.active // installed if either is true
+		m.rebalancer.Status.SvcEnabled = msg.enabled
+		m.rebalancer.Status.SvcActive = msg.active || m.rebalancerRunning
 		m.rebalancer.Status.SkipPending = msg.skipPending
-		m.rebalancer.Status.Active = msg.active || m.rebalancerRunning
 		m.rebalancer.Status.LastRun = msg.lastRun
 		m.rebalancer.Status.NextRun = msg.nextRun
 		return m, nil
@@ -381,10 +380,9 @@ func (m Model) updateModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modal = nil
 		m.rebalanceCfg = msg.Cfg
 		m.rebalancer.Status.Cfg = msg.Cfg
-		m.rebalancer.Status.Enabled = msg.Cfg.RebalanceEnabled
 		m.status = "Rebalancer config saved."
 		m.statusIsErr = false
-		return m, nil
+		return m, m.loadRebalancerStatus()
 
 	case modals.RebalanceCfgClosedMsg:
 		m.modal = nil
@@ -519,7 +517,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.rebalancerRunning = true
-		m.rebalancer.Status.Active = true
+		m.rebalancer.Status.SvcActive = true
 		m.status = "Rebalancer started (this may take a few minutes)."
 		return m, m.runRebalanceAsync(false)
 

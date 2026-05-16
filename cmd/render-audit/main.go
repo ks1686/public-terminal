@@ -112,9 +112,10 @@ func main() {
 	{
 		rm := components.NewRebalancerModel()
 		rm.Width = width
-		rm.Status.Cfg = config.RebalanceConfig{Index: "SP500", TopN: 500}
-		rm.Status.Enabled = true
-		rm.Status.Active = true
+		rm.Status.Cfg = config.RebalanceConfig{Index: "SP500", TopN: 500, RebalanceEnabled: true}
+		rm.Status.SvcInstalled = true
+		rm.Status.SvcEnabled = true
+		rm.Status.SvcActive = true
 		rm.Status.LastRun = "Mon 2026-05-12 12:00 EST"
 		rm.Status.NextRun = "Tue 2026-05-13 12:00 EST"
 		fmt.Println(rm.View())
@@ -125,7 +126,8 @@ func main() {
 		rm := components.NewRebalancerModel()
 		rm.Width = width
 		rm.Status.Cfg = config.RebalanceConfig{Index: "FTSE_GLOBAL_ALL_CAP", TopN: 25}
-		rm.Status.Enabled = false
+		rm.Status.SvcInstalled = true
+		rm.Status.SvcEnabled = false
 		rm.Status.SkipPending = true
 		fmt.Println(rm.View())
 	}

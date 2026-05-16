@@ -59,23 +59,13 @@ jobs:
       - name: Build binary
         run: |
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -o dist/public-terminal ./cmd/public-terminal
-
-      - name: Package release artifact
-        shell: bash
-        run: |
-          mkdir -p dist/release
-          cp dist/public-terminal dist/release/
-          cp .env.example dist/release/
-          mkdir -p dist/release/cache
-          touch dist/release/cache/.gitkeep
-          tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist/release .
+            go build -o public-terminal ./cmd/public-terminal
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}.tar.gz
+          path: public-terminal
 
   release:
     needs: build-binaries
@@ -88,10 +78,19 @@ jobs:
         with:
           path: dist/
 
+      - name: Rename binaries for release
+        shell: bash
+        run: |
+          for f in dist/public-terminal-*/public-terminal; do
+            dir=$(dirname "$f")
+            name=$(basename "$dir")
+            cp "$f" "dist/$name"
+          done
+
       - name: Generate SHA256 checksums
         shell: bash
         run: |
-          find dist -type f -name "*.tar.gz" -print0 \
+          find dist -type f -name "public-terminal-*" -not -path "*/public-terminal" -print0 \
             | sort -z \
             | xargs -0 sha256sum > dist/SHA256SUMS.txt
 
@@ -100,5 +99,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            dist/**/*.tar.gz
+            dist/public-terminal-*
             dist/SHA256SUMS.txt

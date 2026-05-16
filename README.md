@@ -48,6 +48,28 @@ This opens a browser for OAuth authorization and stores credentials in your OS k
 
 ## Installation & Run
 
+### Quick install (recommended)
+
+```bash
+go install github.com/ks1686/public-terminal/cmd/public-terminal@latest
+```
+
+This installs to `~/go/bin/public-terminal`. Make sure `~/go/bin` is on your `PATH`.
+
+### Download binary
+
+Pre-built binaries for Linux and macOS (amd64/arm64) are attached to each [GitHub release](https://github.com/ks1686/public-terminal/releases).
+
+```bash
+# Linux amd64
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/download/v0.4.0/public-terminal-linux-amd64
+chmod +x public-terminal
+
+# macOS arm64 (Apple Silicon)
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/download/v0.4.0/public-terminal-darwin-arm64
+chmod +x public-terminal
+```
+
 ### Build from source
 
 ```bash

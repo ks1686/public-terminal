@@ -57,63 +57,38 @@ func (m *BalanceModel) FromPortfolio(p *api.Portfolio, accountID string) {
 }
 
 func (m BalanceModel) View() string {
-	width := m.Width
-	if width < 20 {
-		width = 20
+	w := m.Width
+	if w < 20 {
+		w = 20
 	}
-	innerW := max(1, width-4) // inside the rounded border
 
-	title := theme.Muted.Render("PORTFOLIO EQUITY")
-
+	// Line 1: title + equity + daily gain
 	eqStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorCyan)
 	eq := eqStyle.Render(formatMoney(m.TotalEquity))
 
 	gainStr := theme.FormatGain(m.DailyGainPct)
 	gainAmt := formatMoneyStyled(m.DailyGainAmt)
-	daily := fmt.Sprintf("%s (%s)", gainStr, gainAmt)
 
-	top := lipgloss.JoinVertical(lipgloss.Center, title, eq, daily)
-	top = lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Render(top)
+	line1 := theme.Muted.Render("PORTFOLIO") + "  " + eq + "  " + gainStr + " (" + gainAmt + ")"
 
-	// Build the stats row — use JoinHorizontal to handle ANSI widths properly.
-	items := []string{
-		fmt.Sprintf("BP %s", formatMoney(m.BuyingPower)),
-		fmt.Sprintf("OPT BP %s", formatMoney(m.OptionsBP)),
-		fmt.Sprintf("CRYPTO BP %s", formatMoney(m.CryptoBP)),
-	}
+	// Line 2: buying power stats
+	bp := fmt.Sprintf("BP %s", formatMoney(m.BuyingPower))
+	optBP := fmt.Sprintf("OPT BP %s", formatMoney(m.OptionsBP))
+	cBP := fmt.Sprintf("CRYPTO %s", formatMoney(m.CryptoBP))
+
 	cashLabel := "CASH"
 	cashValue := formatMoney(m.Cash)
 	if m.Cash.IsNegative() {
 		cashLabel = "MARGIN"
 		cashValue = theme.Warning.Render(formatMoney(m.Cash.Neg()))
 	}
-	items = append(items, fmt.Sprintf("%s %s", cashLabel, cashValue))
+	cash := fmt.Sprintf("%s %s", cashLabel, cashValue)
 
 	sep := theme.Muted.Render(" │ ")
+	line2 := bp + sep + optBP + sep + cBP + sep + cash
 
-	// Try fitting all 4 on one line; fall back to 2×2 if too wide.
-	row1 := lipgloss.JoinHorizontal(lipgloss.Left,
-		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[0]),
-		sep,
-		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[1]),
-	)
-	row2 := lipgloss.JoinHorizontal(lipgloss.Left,
-		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[2]),
-		sep,
-		lipgloss.NewStyle().Width(innerW/2-2).Align(lipgloss.Left).Render(items[3]),
-	)
-	bottom := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Foreground(theme.ColorGray).Render(row1),
-		lipgloss.NewStyle().Width(innerW).Align(lipgloss.Center).Foreground(theme.ColorGray).Render(row2),
-	)
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(theme.ColorCyan).
-		Width(max(1, width-2)).
-		Render(lipgloss.JoinVertical(lipgloss.Center, top, "", bottom))
-
-	return box
+	content := line1 + "\n" + line2
+	return theme.BalanceBar.Width(max(1, w)).Render(content)
 }
 
 func formatMoney(d decimal.Decimal) string {

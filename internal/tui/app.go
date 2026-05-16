@@ -697,12 +697,12 @@ func (m Model) renderHoldingsPane(w, h int) string {
 	contentH := max(h-2, 4)
 	holdings := m.holdings
 	holdings.SetWidth(contentW)
-	content := holdings.ViewWithHeight(contentH)
+	content := padHeight(holdings.ViewWithHeight(contentH), contentH)
 	style := theme.PaneStocks
 	if m.activePane == paneStocks {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return padHeight(style.Width(w).Render(content), h)
+	return style.Width(w).Render(content)
 }
 
 func (m Model) renderCryptoPane(w, h int) string {
@@ -710,12 +710,12 @@ func (m Model) renderCryptoPane(w, h int) string {
 	contentH := max(h-2, 4)
 	crypto := m.crypto
 	crypto.SetWidth(contentW)
-	content := crypto.ViewWithHeight(contentH)
+	content := padHeight(crypto.ViewWithHeight(contentH), contentH)
 	style := theme.PaneCrypto
 	if m.activePane == paneCrypto {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return padHeight(style.Width(w).Render(content), h)
+	return style.Width(w).Render(content)
 }
 
 func (m Model) renderOptionsPane(w, h int) string {
@@ -723,12 +723,12 @@ func (m Model) renderOptionsPane(w, h int) string {
 	contentH := max(h-2, 4)
 	opts := m.opts
 	opts.SetWidth(contentW)
-	content := opts.ViewWithHeight(contentH)
+	content := padHeight(opts.ViewWithHeight(contentH), contentH)
 	style := theme.PaneOptions
 	if m.activePane == paneOptions {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return padHeight(style.Width(w).Render(content), h)
+	return style.Width(w).Render(content)
 }
 
 func (m Model) renderOrdersPane(w, h int) string {
@@ -736,19 +736,19 @@ func (m Model) renderOrdersPane(w, h int) string {
 	contentH := max(h-2, 4)
 	orders := m.orders
 	orders.SetWidth(contentW)
-	content := orders.ViewWithHeight(contentH)
+	content := padHeight(orders.ViewWithHeight(contentH), contentH)
 	style := theme.PaneOrders
 	if m.activePane == paneOrders {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return padHeight(style.Width(w).Render(content), h)
+	return style.Width(w).Render(content)
 }
 
 func (m Model) renderLoadingPane(w, h int, paneStyle lipgloss.Style, title, msg string) string {
 	contentW := max(w-2, 10)
 	contentH := max(h-2, 4)
-	content := loadingSection(contentW, contentH, title, msg)
-	return padHeight(paneStyle.Width(w).Render(content), h)
+	content := padHeight(loadingSection(contentW, contentH, title, msg), contentH)
+	return paneStyle.Width(w).Render(content)
 }
 
 // padHeight pads or truncates a rendered string to exactly n lines

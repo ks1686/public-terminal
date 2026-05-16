@@ -57,19 +57,12 @@ func (m *BalanceModel) FromPortfolio(p *api.Portfolio, accountID string) {
 }
 
 func (m BalanceModel) View() string {
-	w := m.Width
-	if w < 20 {
-		w = 20
-	}
-
 	// Line 1: title + equity + daily gain
-	eqStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorCyan)
-	eq := eqStyle.Render(formatMoney(m.TotalEquity))
-
+	eq := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorCyan).Render(formatMoney(m.TotalEquity))
 	gainStr := theme.FormatGain(m.DailyGainPct)
 	gainAmt := formatMoneyStyled(m.DailyGainAmt)
 
-	line1 := theme.Muted.Render("PORTFOLIO") + "  " + eq + "  " + gainStr + " (" + gainAmt + ")"
+	line1 := theme.Title.Render("PORTFOLIO") + "  " + eq + "  " + gainStr + " (" + gainAmt + ")"
 
 	// Line 2: buying power stats
 	bp := fmt.Sprintf("BP %s", formatMoney(m.BuyingPower))
@@ -87,8 +80,7 @@ func (m BalanceModel) View() string {
 	sep := theme.Muted.Render(" │ ")
 	line2 := bp + sep + optBP + sep + cBP + sep + cash
 
-	content := line1 + "\n" + line2
-	return theme.BalanceBar.Width(max(1, w)).Render(content)
+	return line1 + "\n" + line2
 }
 
 func formatMoney(d decimal.Decimal) string {
@@ -105,11 +97,4 @@ func formatMoneyStyled(d decimal.Decimal) string {
 		return theme.Positive.Render(fmt.Sprintf("+$%.2f", f))
 	}
 	return theme.Negative.Render(fmt.Sprintf("-$%.2f", -f))
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

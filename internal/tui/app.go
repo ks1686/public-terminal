@@ -642,7 +642,7 @@ func (m Model) renderMain() string {
 
 	_, mainH, leftW, rightW := m.layoutDims(accountBar, balance, rebal, status, footer)
 	if mainH < 16 || leftW < 20 || rightW < 20 {
-		return "TOP"
+		return "LINE1\nLINE2\nLINE3\n" + status + "\n" + footer
 	}
 
 	topH, bottomH := splitMainHeights(mainH)
@@ -659,10 +659,10 @@ func (m Model) renderMain() string {
 		bottomRight = m.renderLoadingPane(rightW, bottomH, theme.PaneOrders, theme.PaneTitleOrders.Render(" OPEN ORDERS"), "Loading open orders…")
 	}
 
-	_ = lipgloss.JoinHorizontal(lipgloss.Top, topLeft, topRight)
-	_ = lipgloss.JoinHorizontal(lipgloss.Top, bottomLeft, bottomRight)
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeft, topRight)
+	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, bottomLeft, bottomRight)
 
-	return "TOP"
+	return "LINE1\nLINE2\nLINE3\nLINE4\n" + topRow + "\n" + bottomRow + "\n" + status + "\n" + footer
 }
 
 func (m Model) renderAccountTabs() string {

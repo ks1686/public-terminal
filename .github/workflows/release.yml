@@ -76,12 +76,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist/
+          path: artifacts/
 
-      - name: Rename binaries for release
+      - name: Flatten binaries
         shell: bash
         run: |
-          for f in dist/public-terminal-*/public-terminal; do
+          mkdir -p dist
+          for f in artifacts/public-terminal-*/public-terminal; do
             dir=$(dirname "$f")
             name=$(basename "$dir")
             cp "$f" "dist/$name"
@@ -90,9 +91,7 @@ jobs:
       - name: Generate SHA256 checksums
         shell: bash
         run: |
-          find dist -type f -name "public-terminal-*" -not -path "*/public-terminal" -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > dist/SHA256SUMS.txt
+          sha256sum dist/public-terminal-* > dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,21 +15,22 @@ import (
 )
 
 // Client wraps the public CLI binary with --json output.
+// Authentication is handled entirely by the public CLI (via keychain after
+// `public auth login`). This project does not read, store, or pass any tokens.
 type Client struct {
 	bin       string
 	accountID string
-	token     string
 }
 
 // NewClient creates a Client. It resolves the public binary from PATH or
-// ~/.local/bin/public, and reads the token from the env file path provided.
-func NewClient(accountID, envFilePath string) (*Client, error) {
+// common install locations. The public CLI must already be authenticated
+// via `public auth login`.
+func NewClient(accountID string) (*Client, error) {
 	bin, err := resolveBin()
 	if err != nil {
 		return nil, err
 	}
-	token := readTokenFromEnv(envFilePath)
-	return &Client{bin: bin, accountID: accountID, token: token}, nil
+	return &Client{bin: bin, accountID: accountID}, nil
 }
 
 func resolveBin() (string, error) {
@@ -46,7 +48,7 @@ func resolveBin() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("public CLI not found; install with: uv tool install publicdotcom-cli")
+	return "", fmt.Errorf("public CLI not found; install from https://github.com/anomalyco/publicdotcom-cli")
 }
 
 func homeDir() string {
@@ -54,42 +56,16 @@ func homeDir() string {
 	return h
 }
 
-func readTokenFromEnv(envFile string) string {
-	b, err := os.ReadFile(envFile)
-	if err != nil {
-		return os.Getenv("PUBLIC_ACCESS_TOKEN")
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "PUBLIC_ACCESS_TOKEN=") {
-			return strings.TrimPrefix(line, "PUBLIC_ACCESS_TOKEN=")
-		}
-	}
-	return os.Getenv("PUBLIC_ACCESS_TOKEN")
-}
-
 // run executes: public --json <args...>
-// --json is a root-level flag in the publicdotcom-cli (declared on app.callback()),
-// so it must come BEFORE the subcommand, not after.
-//
-// Auth: the value stored in our .env under PUBLIC_ACCESS_TOKEN is actually a
-// long-lived personal secret (the API secret key from public.com). The new CLI
-// treats PUBLIC_ACCESS_TOKEN as a short-lived JWT and PUBLIC_PERSONAL_SECRET as
-// the refresh material. We expose our token to the CLI as PUBLIC_PERSONAL_SECRET
-// so its auto-refresh mints a fresh JWT on first call and caches it in keyring.
+// --json is a root-level flag in the publicdotcom-cli, so it must come BEFORE
+// the subcommand. Authentication is handled by the CLI via OS keychain
+// (set up with `public auth login`).
 func (c *Client) run(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	fullArgs := append([]string{"--json"}, args...)
 	cmd := exec.CommandContext(ctx, c.bin, fullArgs...)
-	// Clear any inherited PUBLIC_ACCESS_TOKEN so the CLI doesn't try to use the
-	// personal secret as if it were a short-lived JWT; rely on keyring cache +
-	// auto-refresh from PUBLIC_PERSONAL_SECRET instead.
-	cmd.Env = append(os.Environ(),
-		"PUBLIC_ACCESS_TOKEN=",
-		"PUBLIC_PERSONAL_SECRET="+c.token,
-	)
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -172,29 +148,64 @@ func (c *Client) GetOrder(orderID string) (*Order, error) {
 // History
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (c *Client) ListHistory(pageSize int) ([]HistoryEntry, error) {
-	end := time.Now()
+const (
+	HistoryPageSize        = 100
+	HistoryMaxPages        = 20
+	HistoryMaxTransactions = 1000
+)
+
+// ListHistory pulls the last 90 days of transactions, walking nextToken until
+// the cap is hit. Returns newest-first. Mirrors Python HistoryModal._load_history.
+func (c *Client) ListHistory() ([]HistoryEntry, bool, error) {
+	end := time.Now().UTC()
 	start := end.AddDate(0, 0, -90)
-	args := []string{
-		"history", "list",
-		"-a", c.accountID,
-		"--start", start.Format(time.RFC3339),
-		"--end", end.Format(time.RFC3339),
-		"--page-size", fmt.Sprintf("%d", pageSize),
-	}
-	out, err := c.run(30*time.Second, args...)
-	if err != nil {
-		return nil, err
-	}
-	var resp HistoryResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		var items []HistoryEntry
-		if err2 := json.Unmarshal(out, &items); err2 != nil {
-			return nil, fmt.Errorf("parsing history: %w", err)
+	startStr := start.Format("2006-01-02T15:04:05Z")
+	endStr := end.Format("2006-01-02T15:04:05Z")
+
+	var (
+		all       []HistoryEntry
+		nextToken string
+		truncated bool
+	)
+	for page := 0; page < HistoryMaxPages; page++ {
+		args := []string{
+			"history", "list",
+			"-a", c.accountID,
+			"--start", startStr,
+			"--end", endStr,
+			"--page-size", fmt.Sprintf("%d", HistoryPageSize),
 		}
-		return items, nil
+		if nextToken != "" {
+			args = append(args, "--next-token", nextToken)
+		}
+		out, err := c.run(30*time.Second, args...)
+		if err != nil {
+			return nil, false, err
+		}
+		var resp HistoryResponse
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, false, fmt.Errorf("parsing history: %w", err)
+		}
+		all = append(all, resp.Transactions...)
+		nextToken = resp.NextToken
+		if nextToken == "" {
+			break
+		}
+		if len(all) >= HistoryMaxTransactions {
+			truncated = true
+			break
+		}
 	}
-	return resp.Items, nil
+	if nextToken != "" && !truncated {
+		truncated = true
+	}
+
+	// Newest first, then cap.
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Timestamp > all[j].Timestamp })
+	if len(all) > HistoryMaxTransactions {
+		all = all[:HistoryMaxTransactions]
+	}
+	return all, truncated, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,16 +247,22 @@ func (c *Client) GetQuotes(symbols []string, instrType string) ([]Quote, error) 
 	if len(symbols) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"market", "quotes", "--type", instrType}, symbols...)
+	args := []string{"market", "quotes", "--type", instrType, "--account-id", c.accountID}
+	args = append(args, symbols...)
 	out, err := c.run(15*time.Second, args...)
 	if err != nil {
 		return nil, err
 	}
-	var quotes []Quote
-	if err := json.Unmarshal(out, &quotes); err != nil {
+	var resp QuotesResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		// Older payload was a bare array — try that as a fallback.
+		var bare []Quote
+		if err2 := json.Unmarshal(out, &bare); err2 == nil {
+			return bare, nil
+		}
 		return nil, fmt.Errorf("parsing quotes: %w", err)
 	}
-	return quotes, nil
+	return resp.Quotes, nil
 }
 
 func (c *Client) GetCryptoQuote(symbol string) (decimal.Decimal, error) {
@@ -267,21 +284,6 @@ func (c *Client) GetCryptoQuote(symbol string) (decimal.Decimal, error) {
 // Historic bars (for chart)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ChartPeriods maps (label, CLI period, CLI aggregation) for the 5 chart tabs.
-var ChartPeriods = []ChartPeriod{
-	{Label: "24H", Period: "DAY", Aggregation: "FIVE_MINUTES"},
-	{Label: "1W", Period: "WEEK", Aggregation: "ONE_HOUR"},
-	{Label: "1M", Period: "MONTH", Aggregation: "ONE_DAY"},
-	{Label: "3M", Period: "QUARTER", Aggregation: "ONE_DAY"},
-	{Label: "1Y", Period: "YEAR", Aggregation: "ONE_DAY"},
-}
-
-type ChartPeriod struct {
-	Label       string
-	Period      string
-	Aggregation string
-}
-
 func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, error) {
 	args := []string{"historicdata", "bars", strings.ToUpper(symbol), strings.ToUpper(period)}
 	if aggregation != "" {
@@ -291,20 +293,22 @@ func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, err
 	if err != nil {
 		return nil, err
 	}
-	return parseBars(out)
-}
-
-func parseBars(out []byte) ([]Bar, error) {
+	// Try the session-partitioned shape first.
 	var resp BarsResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		var bars []Bar
-		if listErr := json.Unmarshal(out, &bars); listErr == nil {
-			return bars, nil
+	respErr := json.Unmarshal(out, &resp)
+	if respErr == nil {
+		if flat := resp.Flatten(); len(flat) > 0 {
+			return flat, nil
 		}
-		return nil, fmt.Errorf("parsing bars: %w\nraw: %.500s", err, out)
 	}
-	if flat := resp.Flatten(); len(flat) > 0 {
-		return flat, nil
+	// Fallback: some endpoints may return a flat list.
+	var bars []Bar
+	if listErr := json.Unmarshal(out, &bars); listErr == nil {
+		return bars, nil
+	}
+	// Neither shape parsed — surface whichever error we have, with raw context.
+	if respErr != nil {
+		return nil, fmt.Errorf("parsing bars (session shape): %w\nraw: %.500s", respErr, out)
 	}
 	return nil, fmt.Errorf("bars response had no points; raw: %.500s", out)
 }

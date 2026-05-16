@@ -5,85 +5,58 @@ import (
 	"sort"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/ks1686/public-terminal/internal/tui/table"
 	"github.com/shopspring/decimal"
 
 	"github.com/ks1686/public-terminal/internal/api"
+	"github.com/ks1686/public-terminal/internal/tui/table"
 	"github.com/ks1686/public-terminal/internal/tui/theme"
 )
 
-// HoldingsModel renders the equities positions table.
-type HoldingsModel struct {
+// CryptoModel renders the crypto positions table.
+type CryptoModel struct {
 	tbl  table.Model
 	rows []table.Row
 }
 
-func NewHoldingsModel() HoldingsModel {
-	cols := holdingsColumnsForWidth(80)
+func NewCryptoModel() CryptoModel {
+	cols := cryptoColumnsForWidth(80)
 	t := table.New(
 		table.WithColumns(cols),
 		table.WithFocused(true),
 		table.WithHeight(10),
 	)
 	t.SetStyles(defaultTableStyles())
-	return HoldingsModel{tbl: t}
+	return CryptoModel{tbl: t}
 }
 
-func holdingsColumnsForWidth(w int) []table.Column {
+func cryptoColumnsForWidth(w int) []table.Column {
 	cols := []table.Column{
-		{Title: "Symbol", Width: 10},
-		{Title: "Qty", Width: 14},
-		{Title: "Value", Width: 14},
-		{Title: "Last", Width: 12},
-		{Title: "Day %", Width: 10},
+		{Title: "Symbol", Width: 9},
+		{Title: "Qty", Width: 10},
+		{Title: "Value", Width: 12},
+		{Title: "Last", Width: 10},
+		{Title: "Day %", Width: 8},
 	}
-	// Hide Day% first (10), then Last (12), then shrink Qty/Value.
-	// Thresholds are tuned for content area widths (pane width minus 2 for border).
-	if w < 62 {
-		cols[4].Width = 0 // total now 50
-	}
+	// Thresholds tuned for content area widths (pane width minus 2 for border).
+	// Right pane is narrower (40% on small terminals).
 	if w < 52 {
-		cols[3].Width = 0 // total now 38
+		cols[3].Width = 0 // hide Last, total now 39
 	}
-	if w < 40 {
+	if w < 42 {
+		cols[4].Width = 0 // hide Day%, total now 31
+	}
+	if w < 34 {
 		cols[1].Width = 8
-		cols[2].Width = 10 // total now 28
+		cols[2].Width = 10 // shrink Qty/Value, total now 27
 	}
-	if w < 30 {
-		cols[2].Width = 0 // total now 18
+	if w < 28 {
+		cols[1].Width = 0
+		cols[2].Width = 9 // hide Qty, shrink Value, total now 18
 	}
 	return cols
 }
 
-func defaultTableStyles() table.Styles {
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("8")).
-		BorderBottom(true).
-		Bold(true).
-		Foreground(lipgloss.Color("6"))
-	s.Selected = s.Selected.
-		Background(lipgloss.Color("237")).
-		UnsetForeground().
-		Bold(false)
-	return s
-}
-
-// renderTablePane renders a section title above the table body, or an
-// empty-state message when the table has no rows. The -2 accounts for the
-// title line + table header row inside the surrounding pane border.
-func renderTablePane(tbl *table.Model, h int, title, emptyMsg string, empty bool) string {
-	tbl.SetHeight(h - 1)
-	body := tbl.View()
-	if empty {
-		body = theme.Muted.Render(emptyMsg)
-	}
-	return title + "\n" + body
-}
-
-func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
+func (m *CryptoModel) FromPortfolio(p *api.Portfolio) {
 	type rowData struct {
 		symbol string
 		qty    string
@@ -94,7 +67,7 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 	}
 	var rows []rowData
 	for _, pos := range p.Positions {
-		if pos.Instrument.Type != "EQUITY" {
+		if pos.Instrument.Type != "CRYPTO" {
 			continue
 		}
 		sym := pos.Instrument.Symbol
@@ -159,7 +132,13 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 	m.tbl.SetRows(tRows)
 }
 
-func (m HoldingsModel) SelectedSymbol() string {
+func (m CryptoModel) Update(msg tea.Msg) (CryptoModel, tea.Cmd) {
+	var cmd tea.Cmd
+	m.tbl, cmd = m.tbl.Update(msg)
+	return m, cmd
+}
+
+func (m CryptoModel) SelectedSymbol() string {
 	r := m.tbl.SelectedRow()
 	if r == nil || len(r) == 0 {
 		return ""
@@ -167,17 +146,11 @@ func (m HoldingsModel) SelectedSymbol() string {
 	return r[0]
 }
 
-func (m HoldingsModel) Update(msg tea.Msg) (HoldingsModel, tea.Cmd) {
-	var cmd tea.Cmd
-	m.tbl, cmd = m.tbl.Update(msg)
-	return m, cmd
-}
-
-func (m *HoldingsModel) SetWidth(w int) {
+func (m *CryptoModel) SetWidth(w int) {
 	m.tbl.SetWidth(max(1, w))
-	m.tbl.SetColumns(holdingsColumnsForWidth(w))
+	m.tbl.SetColumns(cryptoColumnsForWidth(w))
 }
 
-func (m HoldingsModel) ViewWithHeight(h int) string {
-	return renderTablePane(&m.tbl, h, theme.PaneTitleStocks.Render(" STOCKS"), "  No stock positions.", len(m.rows) == 0)
+func (m CryptoModel) ViewWithHeight(h int) string {
+	return renderTablePane(&m.tbl, h, theme.PaneTitleCrypto.Render(" CRYPTO"), "  No crypto positions.", len(m.rows) == 0)
 }

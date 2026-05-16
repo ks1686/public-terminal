@@ -90,7 +90,10 @@ func (m OrderModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.orderType = (m.orderType + 1) % len(orderTypes)
 
 		case "ctrl+s", "enter":
-			return m, m.trySubmit()
+			if m.focus == 0 || m.focus == 1 || m.focus == 2 || m.focus == 3 || m.focus == 4 {
+				// handled by trySubmit
+			}
+			return m.trySubmit()
 		}
 	}
 
@@ -121,44 +124,79 @@ func (m *OrderModal) refocus() {
 	}
 }
 
-func (m OrderModal) trySubmit() tea.Cmd {
-	return func() tea.Msg {
-		sym := strings.ToUpper(strings.TrimSpace(m.symInput.Value()))
-		instrType := strings.ToUpper(strings.TrimSpace(m.typeInput.Value()))
-		if instrType == "" {
-			instrType = "EQUITY"
-		}
-		amtStr := strings.TrimSpace(m.qtyInput.Value())
-		if sym == "" || amtStr == "" {
-			return nil
-		}
-		amt, err := decimal.NewFromString(amtStr)
-		if err != nil || !amt.IsPositive() {
-			return nil
-		}
+func (m *OrderModal) trySubmit() (tea.Model, tea.Cmd) {
+	sym := strings.ToUpper(strings.TrimSpace(m.symInput.Value()))
+	if sym == "" {
+		m.err = "Symbol is required."
+		m.focus = 0
+		m.refocus()
+		return m, nil
+	}
+	instrType := strings.ToUpper(strings.TrimSpace(m.typeInput.Value()))
+	if instrType == "" {
+		instrType = "EQUITY"
+	}
+	amtStr := strings.TrimSpace(m.qtyInput.Value())
+	if amtStr == "" {
+		m.err = "Amount is required."
+		m.focus = 2
+		m.refocus()
+		return m, nil
+	}
+	amt, err := decimal.NewFromString(amtStr)
+	if err != nil || !amt.IsPositive() {
+		m.err = "Amount must be a positive number."
+		m.focus = 2
+		m.refocus()
+		return m, nil
+	}
 
-		ot := orderTypes[m.orderType]
-		req := api.OrderRequest{
-			Instrument: api.OrderInstrument{Symbol: sym, Type: instrType},
-			OrderSide:  m.side,
-			OrderType:  ot,
-			Expiration: api.OrderExpiration{TimeInForce: "DAY"},
-			Amount:     &amt,
-		}
+	ot := orderTypes[m.orderType]
+	req := api.OrderRequest{
+		Instrument: api.OrderInstrument{Symbol: sym, Type: instrType},
+		OrderSide:  m.side,
+		OrderType:  ot,
+		Expiration: api.OrderExpiration{TimeInForce: "DAY"},
+		Amount:     &amt,
+	}
 
-		if ot == "LIMIT" || ot == "STOP_LIMIT" {
-			lp, err := decimal.NewFromString(strings.TrimSpace(m.limitInput.Value()))
-			if err == nil && lp.IsPositive() {
-				req.LimitPrice = &lp
-			}
+	if ot == "LIMIT" || ot == "STOP_LIMIT" {
+		lpStr := strings.TrimSpace(m.limitInput.Value())
+		if lpStr == "" {
+			m.err = "Limit price is required for this order type."
+			m.focus = 3
+			m.refocus()
+			return m, nil
 		}
-		if ot == "STOP" || ot == "STOP_LIMIT" {
-			sp, err := decimal.NewFromString(strings.TrimSpace(m.stopInput.Value()))
-			if err == nil && sp.IsPositive() {
-				req.StopPrice = &sp
-			}
+		lp, err := decimal.NewFromString(lpStr)
+		if err != nil || !lp.IsPositive() {
+			m.err = "Limit price must be a positive number."
+			m.focus = 3
+			m.refocus()
+			return m, nil
 		}
+		req.LimitPrice = &lp
+	}
+	if ot == "STOP" || ot == "STOP_LIMIT" {
+		spStr := strings.TrimSpace(m.stopInput.Value())
+		if spStr == "" {
+			m.err = "Stop price is required for this order type."
+			m.focus = 4
+			m.refocus()
+			return m, nil
+		}
+		sp, err := decimal.NewFromString(spStr)
+		if err != nil || !sp.IsPositive() {
+			m.err = "Stop price must be a positive number."
+			m.focus = 4
+			m.refocus()
+			return m, nil
+		}
+		req.StopPrice = &sp
+	}
 
+	m.err = ""
+	return m, func() tea.Msg {
 		if err := m.client.PlaceOrder(req); err != nil {
 			return errMsg{err}
 		}

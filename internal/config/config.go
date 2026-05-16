@@ -46,7 +46,6 @@ func cacheDir(accountID string) string {
 func norm(id string) string { return strings.ToUpper(strings.TrimSpace(id)) }
 
 func AccountsFile() string          { return filepath.Join(AppDir(), "accounts.json") }
-func EnvFile() string               { return filepath.Join(AppDir(), ".env") }
 func RebalanceConfigPath(id string) string { return filepath.Join(accountDir(id), "rebalance_config.json") }
 func PortfolioCachePath(id string) string  { return filepath.Join(cacheDir(id), "portfolio_cache.json") }
 func IndexCachePath(id, index string) string {
@@ -114,42 +113,6 @@ func RemoveAccount(id string) error {
 	dir := filepath.Join(AppDir(), "accounts", n)
 	_ = os.RemoveAll(dir)
 	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Credentials (.env)
-// ─────────────────────────────────────────────────────────────────────────────
-
-func ReadEnvToken() string {
-	b, err := os.ReadFile(EnvFile())
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "PUBLIC_ACCESS_TOKEN=") {
-			return strings.TrimPrefix(line, "PUBLIC_ACCESS_TOKEN=")
-		}
-	}
-	return ""
-}
-
-func WriteEnv(token string) error {
-	var lines []string
-	if b, err := os.ReadFile(EnvFile()); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			key := strings.SplitN(line, "=", 2)[0]
-			if key != "PUBLIC_ACCESS_TOKEN" && key != "PUBLIC_ACCOUNT_NUMBER" && key != "PUBLIC_API_SECRET_KEY" {
-				lines = append(lines, line)
-			}
-		}
-	}
-	lines = append(lines, "PUBLIC_ACCESS_TOKEN="+token)
-	return os.WriteFile(EnvFile(), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
-}
-
-func CredentialsPresent() bool {
-	return ReadEnvToken() != "" && len(GetAccounts()) > 0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

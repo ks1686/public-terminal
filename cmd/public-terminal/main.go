@@ -14,15 +14,17 @@ const version = "0.4.0"
 
 func main() {
 	var (
-		showVersion    = flag.Bool("version", false, "print version and exit")
-		doRebalance    = flag.Bool("rebalance", false, "run the rebalancer and exit")
-		dryRun         = flag.Bool("dry-run", false, "dry-run mode (no orders placed)")
-		accountID      = flag.String("account", "", "account ID to operate on (default: first configured account)")
-		installSvc     = flag.Bool("install-service", false, "install systemd/launchd service files and exit")
-		removeSvc      = flag.Bool("remove-service", false, "remove systemd/launchd service files and exit")
-		validate       = flag.Bool("validate", false, "compute rebalance plan without placing orders and print it")
+		showVersion = flag.Bool("version", false, "print version and exit")
+		doRebalance = flag.Bool("rebalance", false, "run the rebalancer and exit")
+		dryRun      = flag.Bool("dry-run", false, "dry-run mode (no orders placed)")
+		accountID   = flag.String("account", "", "account ID to operate on (default: first configured account)")
+		installSvc  = flag.Bool("install-service", false, "install systemd/launchd service files and exit")
+		removeSvc   = flag.Bool("remove-service", false, "remove systemd/launchd service files and exit")
+		validate    = flag.Bool("validate", false, "compute rebalance plan without placing orders and print it")
 	)
 	flag.Parse()
+
+	config.MigrateIfNeeded()
 
 	if *showVersion {
 		fmt.Println("public-terminal", version)

@@ -9,7 +9,9 @@ import (
 
 var (
 	ColorBlack  = lipgloss.Color("0")
+	ColorBlue   = lipgloss.Color("4")
 	ColorGreen  = lipgloss.Color("2")
+	ColorPurple = lipgloss.Color("5")
 	ColorRed    = lipgloss.Color("1")
 	ColorYellow = lipgloss.Color("3")
 	ColorCyan   = lipgloss.Color("6")
@@ -46,20 +48,34 @@ var (
 
 	KeyHint = lipgloss.NewStyle().Foreground(ColorGray)
 
-	// Panes — mirror Python CSS: left-pane primary (cyan), right-pane accent (yellow).
-	PaneLeft = lipgloss.NewStyle().
+	// Four-pane quadrant styles.
+	PaneStocks = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(ColorCyan)
-	PaneRight = lipgloss.NewStyle().
+	PaneCrypto = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(ColorPurple)
+	PaneOptions = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(ColorBlue)
+	PaneOrders = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(ColorYellow)
 
-	// Section title labels inside panes — colored backgrounds, bold, height 1.
-	PaneTitle = lipgloss.NewStyle().
+	// Section title labels inside panes.
+	PaneTitleStocks = lipgloss.NewStyle().
 			Background(ColorCyan).
 			Foreground(ColorBlack).
 			Bold(true)
-	PaneTitleAccent = lipgloss.NewStyle().
+	PaneTitleCrypto = lipgloss.NewStyle().
+			Background(ColorPurple).
+			Foreground(ColorBlack).
+			Bold(true)
+	PaneTitleOptions = lipgloss.NewStyle().
+				Background(ColorBlue).
+				Foreground(ColorWhite).
+				Bold(true)
+	PaneTitleOrders = lipgloss.NewStyle().
 			Background(ColorYellow).
 			Foreground(ColorBlack).
 			Bold(true)

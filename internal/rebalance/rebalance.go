@@ -44,17 +44,11 @@ func GetPortfolioSnapshot(client *api.Client) (*PortfolioSnapshot, error) {
 		}
 	}
 	bp := p.BuyingPower.BuyingPower
-	cashBP := bp // default: same as buying power if no margin
-	if p.BuyingPower.CryptoBuyingPower == nil {
-		// No crypto BP field — likely no margin info
-	}
-	// cash_only_buying_power is not directly exposed by the CLI in the same way
-	// as the Python SDK. We approximate it as bp when there's no margin.
-	// If cashBalance >= 0, cashBP = bp (no margin drawn)
-	// If cashBalance < 0, cashBP = bp + cashBalance (cash BP only from settled cash)
-	if cashBalance.IsNegative() {
-		// Margin likely in use; approximate cash-only BP conservatively
-		cashBP = decimal.Max(decimal.Zero, bp.Add(cashBalance))
+	cashBP := p.BuyingPower.CashOnlyBuyingPower
+	if cashBP.IsZero() && bp.IsPositive() {
+		// Older payloads may omit cashOnlyBuyingPower; assume same as bp so the
+		// margin delta is zero rather than spuriously positive.
+		cashBP = bp
 	}
 
 	snap := &PortfolioSnapshot{
@@ -186,7 +180,7 @@ func Run(accountID string, dryRun bool) error {
 	}
 
 	// Create API client
-	client, err := api.NewClient(accountID, config.EnvFile())
+	client, err := api.NewClient(accountID)
 	if err != nil {
 		return fmt.Errorf("creating API client: %w", err)
 	}

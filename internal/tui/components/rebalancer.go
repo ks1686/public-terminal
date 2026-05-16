@@ -28,6 +28,10 @@ func NewRebalancerModel() RebalancerModel { return RebalancerModel{} }
 
 func (m RebalancerModel) View() string {
 	s := m.Status
+	w := m.Width
+	if w < 1 {
+		w = 1
+	}
 
 	var parts []string
 
@@ -60,5 +64,5 @@ func (m RebalancerModel) View() string {
 
 	sep := theme.Muted.Render("  │  ")
 	line := strings.Join(parts, sep)
-	return theme.RebalancerBar.Width(m.Width).Render(line)
+	return theme.RebalancerBar.Width(w).Render(line)
 }

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ks1686/public-terminal/internal/tui/table"
 
 	"github.com/ks1686/public-terminal/internal/api"
 	"github.com/ks1686/public-terminal/internal/options"
@@ -18,6 +18,17 @@ type OptionsModel struct {
 }
 
 func NewOptionsModel() OptionsModel {
+	cols := optionsColumnsForWidth(80)
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	t.SetStyles(defaultTableStyles())
+	return OptionsModel{tbl: t}
+}
+
+func optionsColumnsForWidth(w int) []table.Column {
 	cols := []table.Column{
 		{Title: "Symbol", Width: 22},
 		{Title: "Type", Width: 6},
@@ -28,13 +39,27 @@ func NewOptionsModel() OptionsModel {
 		{Title: "Day %", Width: 10},
 		{Title: "DTE", Width: 5},
 	}
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithFocused(true),
-		table.WithHeight(10),
-	)
-	t.SetStyles(defaultTableStyles())
-	return OptionsModel{tbl: t}
+	// Thresholds tuned for content area widths (pane width minus 2 for border).
+	if w < 80 {
+		cols[6].Width = 0
+		cols[7].Width = 0 // total now 64
+	}
+	if w < 64 {
+		cols[5].Width = 0 // total now 54
+	}
+	if w < 54 {
+		cols[3].Width = 0 // total now 44
+	}
+	if w < 44 {
+		cols[4].Width = 0 // total now 38
+	}
+	if w < 38 {
+		cols[2].Width = 0 // total now 28
+	}
+	if w < 28 {
+		cols[1].Width = 0 // total now 22
+	}
+	return cols
 }
 
 func (m *OptionsModel) FromPortfolio(p *api.Portfolio) {
@@ -77,6 +102,11 @@ func (m OptionsModel) Update(msg tea.Msg) (OptionsModel, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *OptionsModel) SetWidth(w int) {
+	m.tbl.SetWidth(max(1, w))
+	m.tbl.SetColumns(optionsColumnsForWidth(w))
+}
+
 func (m OptionsModel) ViewWithHeight(h int) string {
-	return renderTablePane(&m.tbl, h, theme.PaneTitle.Render(" OPTIONS"), "  No option positions.", len(m.rows) == 0)
+	return renderTablePane(&m.tbl, h, theme.PaneTitleOptions.Render(" OPTIONS"), "  No option positions.", len(m.rows) == 0)
 }

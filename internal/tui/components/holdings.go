@@ -161,7 +161,7 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 
 func (m HoldingsModel) SelectedSymbol() string {
 	r := m.tbl.SelectedRow()
-	if r == nil || len(r) == 0 {
+	if len(r) == 0 {
 		return ""
 	}
 	return r[0]

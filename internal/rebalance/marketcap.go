@@ -51,7 +51,7 @@ func loadMarketCapCache(cachePath, index string) (map[string]float64, bool) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, false
 	}
-	if c.Caps == nil || len(c.Caps) == 0 {
+	if len(c.Caps) == 0 {
 		return nil, false
 	}
 	if c.SourceTickerCount < 1 {

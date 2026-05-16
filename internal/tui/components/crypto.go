@@ -140,7 +140,7 @@ func (m CryptoModel) Update(msg tea.Msg) (CryptoModel, tea.Cmd) {
 
 func (m CryptoModel) SelectedSymbol() string {
 	r := m.tbl.SelectedRow()
-	if r == nil || len(r) == 0 {
+	if len(r) == 0 {
 		return ""
 	}
 	return r[0]

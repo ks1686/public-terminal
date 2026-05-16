@@ -642,24 +642,27 @@ func (m Model) renderMain() string {
 
 	_, mainH, leftW, rightW := m.layoutDims(accountBar, balance, rebal, status, footer)
 	if mainH < 16 || leftW < 20 || rightW < 20 {
-		return "LINE1\nLINE2\nLINE3\n" + status + "\n" + footer
+		return accountBar + "\n" + balance + "\n" + rebal + "\n" + status + "\n" + footer
 	}
 
 	topH, bottomH := splitMainHeights(mainH)
 
-	_ = m.renderHoldingsPane(leftW, topH)
-	_ = m.renderCryptoPane(rightW, topH)
-	_ = m.renderOptionsPane(leftW, bottomH)
-	_ = m.renderOrdersPane(rightW, bottomH)
+	topLeft := m.renderHoldingsPane(leftW, topH)
+	topRight := m.renderCryptoPane(rightW, topH)
+	bottomLeft := m.renderOptionsPane(leftW, bottomH)
+	bottomRight := m.renderOrdersPane(rightW, bottomH)
 
 	if m.loading {
-		_ = m.renderLoadingPane(leftW, topH, theme.PaneStocks, theme.PaneTitleStocks.Render(" STOCKS"), "Loading stocks…")
-		_ = m.renderLoadingPane(rightW, topH, theme.PaneCrypto, theme.PaneTitleCrypto.Render(" CRYPTO"), "Loading crypto…")
-		_ = m.renderLoadingPane(leftW, bottomH, theme.PaneOptions, theme.PaneTitleOptions.Render(" OPTIONS"), "Loading options…")
-		_ = m.renderLoadingPane(rightW, bottomH, theme.PaneOrders, theme.PaneTitleOrders.Render(" OPEN ORDERS"), "Loading open orders…")
+		topLeft = m.renderLoadingPane(leftW, topH, theme.PaneStocks, theme.PaneTitleStocks.Render(" STOCKS"), "Loading stocks…")
+		topRight = m.renderLoadingPane(rightW, topH, theme.PaneCrypto, theme.PaneTitleCrypto.Render(" CRYPTO"), "Loading crypto…")
+		bottomLeft = m.renderLoadingPane(leftW, bottomH, theme.PaneOptions, theme.PaneTitleOptions.Render(" OPTIONS"), "Loading options…")
+		bottomRight = m.renderLoadingPane(rightW, bottomH, theme.PaneOrders, theme.PaneTitleOrders.Render(" OPEN ORDERS"), "Loading open orders…")
 	}
 
-	return "LINE1\nLINE2\nLINE3\nLINE4\n" + accountBar + "\n" + balance + "\n" + rebal + "\n" + status + "\n" + footer
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeft, topRight)
+	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, bottomLeft, bottomRight)
+
+	return accountBar + "\n" + balance + "\n" + rebal + "\n" + topRow + "\n" + bottomRow + "\n" + status + "\n" + footer
 }
 
 func (m Model) renderAccountTabs() string {
@@ -699,7 +702,7 @@ func (m Model) renderHoldingsPane(w, h int) string {
 	if m.activePane == paneStocks {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return style.Width(w).Height(h).Render(content)
+	return padHeight(style.Width(w).Render(content), h)
 }
 
 func (m Model) renderCryptoPane(w, h int) string {
@@ -712,7 +715,7 @@ func (m Model) renderCryptoPane(w, h int) string {
 	if m.activePane == paneCrypto {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return style.Width(w).Height(h).Render(content)
+	return padHeight(style.Width(w).Render(content), h)
 }
 
 func (m Model) renderOptionsPane(w, h int) string {
@@ -725,7 +728,7 @@ func (m Model) renderOptionsPane(w, h int) string {
 	if m.activePane == paneOptions {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return style.Width(w).Height(h).Render(content)
+	return padHeight(style.Width(w).Render(content), h)
 }
 
 func (m Model) renderOrdersPane(w, h int) string {
@@ -738,14 +741,29 @@ func (m Model) renderOrdersPane(w, h int) string {
 	if m.activePane == paneOrders {
 		style = style.BorderForeground(theme.ColorWhite)
 	}
-	return style.Width(w).Height(h).Render(content)
+	return padHeight(style.Width(w).Render(content), h)
 }
 
 func (m Model) renderLoadingPane(w, h int, paneStyle lipgloss.Style, title, msg string) string {
 	contentW := max(w-2, 10)
 	contentH := max(h-2, 4)
 	content := loadingSection(contentW, contentH, title, msg)
-	return paneStyle.Width(w).Height(h).Render(content)
+	return padHeight(paneStyle.Width(w).Render(content), h)
+}
+
+// padHeight pads or truncates a rendered string to exactly n lines
+// without using lipgloss Height(), which emits ANSI cursor codes that
+// can overwrite surrounding content when strings are joined.
+func padHeight(rendered string, h int) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < h {
+		pad := strings.Repeat("\n", h-len(lines))
+		return rendered + pad
+	}
+	if len(lines) > h {
+		return strings.Join(lines[:h], "\n")
+	}
+	return rendered
 }
 
 func loadingSection(w, h int, title, msg string) string {

@@ -109,3 +109,78 @@ func TestTopNByMarketCap(t *testing.T) {
 		t.Errorf("unexpected top 3: %v", result)
 	}
 }
+
+func TestComputeStockWeights_Error(t *testing.T) {
+	// Test case: all market caps are zero
+	tickers := []string{"AAPL", "MSFT"}
+	caps := map[string]float64{
+		"AAPL": 0.0,
+		"MSFT": 0.0,
+	}
+	weights, err := ComputeStockWeights(tickers, caps)
+	if err == nil {
+		t.Error("expected error when all market caps are zero")
+	}
+	if weights != nil {
+		t.Error("expected nil weights when error is returned")
+	}
+
+	// Test case: no tickers
+	tickersEmpty := []string{}
+	capsEmpty := map[string]float64{}
+	weights, err = ComputeStockWeights(tickersEmpty, capsEmpty)
+	if err == nil {
+		t.Error("expected error when there are no tickers")
+	}
+	if weights != nil {
+		t.Error("expected nil weights when error is returned")
+	}
+}
+
+func TestComputeStockWeights_IgnoreNegativeAndMissing(t *testing.T) {
+	tickers := []string{"AAPL", "MSFT", "GOOGL", "MISSING"}
+	caps := map[string]float64{
+		"AAPL":  3000,
+		"MSFT":  -2500, // Negative market cap
+		"GOOGL": 1000,
+		// "MISSING" is intentionally omitted from the map
+		"EXTRA": 5000, // Extra ticker not in the list
+	}
+	weights, err := ComputeStockWeights(tickers, caps)
+	if err != nil {
+		t.Fatalf("ComputeStockWeights: %v", err)
+	}
+
+	if len(weights) != 2 {
+		t.Errorf("expected 2 weights, got %d", len(weights))
+	}
+
+	if _, ok := weights["AAPL"]; !ok {
+		t.Error("expected AAPL to be in weights")
+	}
+	if _, ok := weights["GOOGL"]; !ok {
+		t.Error("expected GOOGL to be in weights")
+	}
+
+	if _, ok := weights["MSFT"]; ok {
+		t.Error("expected MSFT to be ignored due to negative market cap")
+	}
+	if _, ok := weights["MISSING"]; ok {
+		t.Error("expected MISSING to be ignored due to missing market cap")
+	}
+	if _, ok := weights["EXTRA"]; ok {
+		t.Error("expected EXTRA to be ignored as it is not in the tickers list")
+	}
+
+	// Calculate expected weights manually: AAPL (3000), GOOGL (1000) -> total 4000
+	// AAPL weight = 0.75, GOOGL weight = 0.25
+	aaplWeight := decimal.NewFromFloat(0.75)
+	googlWeight := decimal.NewFromFloat(0.25)
+
+	if !weights["AAPL"].Equal(aaplWeight) {
+		t.Errorf("expected AAPL weight %s, got %s", aaplWeight, weights["AAPL"])
+	}
+	if !weights["GOOGL"].Equal(googlWeight) {
+		t.Errorf("expected GOOGL weight %s, got %s", googlWeight, weights["GOOGL"])
+	}
+}

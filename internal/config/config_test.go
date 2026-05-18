@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -124,6 +125,60 @@ func TestRemoveAccount_LastAccountFails(t *testing.T) {
 	if err := RemoveAccount("ACCT001"); err == nil {
 		t.Error("expected error for removing last account")
 	}
+}
+
+func TestSaveRebalanceConfig_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-style permission bits are not enforced on windows")
+	}
+
+	tmpAppDir(t)
+	cfg := RebalanceConfig{
+		Index:            "SP500",
+		TopN:             100,
+		MarginUsagePct:   0.5,
+		ExcludedTickers:  []string{"aapl"},
+		Allocations:      map[string]float64{"stocks": 1.0},
+		RebalanceEnabled: true,
+	}
+
+	t.Run("creates owner-only file", func(t *testing.T) {
+		accountID := "ACCT001"
+		if err := SaveRebalanceConfig(accountID, cfg); err != nil {
+			t.Fatalf("SaveRebalanceConfig: %v", err)
+		}
+
+		info, err := os.Stat(RebalanceConfigPath(accountID))
+		if err != nil {
+			t.Fatalf("stat rebalance config: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("permissions = %o, want 600", got)
+		}
+	})
+
+	t.Run("tightens existing broad permissions", func(t *testing.T) {
+		accountID := "ACCT002"
+		path := RebalanceConfigPath(accountID)
+		if err := os.WriteFile(path, []byte(`{"index":"SP500"}`), 0o644); err != nil {
+			t.Fatalf("seed rebalance config: %v", err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod seed rebalance config: %v", err)
+		}
+
+		if err := SaveRebalanceConfig(accountID, cfg); err != nil {
+			t.Fatalf("SaveRebalanceConfig: %v", err)
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat rebalance config: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("permissions = %o, want 600", got)
+		}
+	})
 }
 
 func TestMigration_V0ToV1_MovesRebalanceConfig(t *testing.T) {

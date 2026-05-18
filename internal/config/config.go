@@ -172,7 +172,11 @@ func SaveRebalanceConfig(accountID string, cfg RebalanceConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(RebalanceConfigPath(accountID), b, 0o600)
+	path := RebalanceConfigPath(accountID)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

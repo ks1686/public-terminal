@@ -1,6 +1,7 @@
 package rebalance
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -97,15 +98,66 @@ func TestComputeStockWeights(t *testing.T) {
 }
 
 func TestTopNByMarketCap(t *testing.T) {
-	tickers := []string{"A", "B", "C", "D", "E"}
-	caps := map[string]float64{"A": 100, "B": 300, "C": 200, "D": 500, "E": 400}
-
-	result := TopNByMarketCap(tickers, caps, 3)
-	if len(result) != 3 {
-		t.Fatalf("expected 3, got %d", len(result))
+	tests := []struct {
+		name       string
+		tickers    []string
+		marketCaps map[string]float64
+		n          int
+		want       []string
+	}{
+		{
+			name:       "basic top 3",
+			tickers:    []string{"A", "B", "C", "D", "E"},
+			marketCaps: map[string]float64{"A": 100, "B": 300, "C": 200, "D": 500, "E": 400},
+			n:          3,
+			want:       []string{"D", "E", "B"},
+		},
+		{
+			name:       "n greater than available",
+			tickers:    []string{"A", "B"},
+			marketCaps: map[string]float64{"A": 100, "B": 200},
+			n:          5,
+			want:       []string{"B", "A"},
+		},
+		{
+			name:       "missing entries in map",
+			tickers:    []string{"A", "B", "C"},
+			marketCaps: map[string]float64{"A": 100, "C": 300},
+			n:          3,
+			want:       []string{"C", "A"},
+		},
+		{
+			name:       "empty list",
+			tickers:    []string{},
+			marketCaps: map[string]float64{},
+			n:          3,
+			want:       []string{},
+		},
+		{
+			name:       "n is zero",
+			tickers:    []string{"A", "B"},
+			marketCaps: map[string]float64{"A": 100, "B": 200},
+			n:          0,
+			want:       []string{},
+		},
+		{
+			name:       "trigger logging",
+			tickers:    []string{"MEGA", "TINY"},
+			marketCaps: map[string]float64{"MEGA": 2e12, "TINY": 5e8},
+			n:          2,
+			want:       []string{"MEGA", "TINY"},
+		},
 	}
-	// Top 3 by market cap: D(500), E(400), B(300)
-	if result[0] != "D" || result[1] != "E" || result[2] != "B" {
-		t.Errorf("unexpected top 3: %v", result)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TopNByMarketCap(tt.tickers, tt.marketCaps, tt.n)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return // empty slices match
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("TopNByMarketCap() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

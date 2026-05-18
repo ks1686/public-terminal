@@ -172,11 +172,7 @@ func SaveRebalanceConfig(accountID string, cfg RebalanceConfig) error {
 	if err != nil {
 		return err
 	}
-	path := RebalanceConfigPath(accountID)
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
+	return os.WriteFile(RebalanceConfigPath(accountID), b, 0o600)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,5 +317,5 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return os.WriteFile(path, b, 0o600)
 }

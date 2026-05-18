@@ -45,9 +45,11 @@ func GetPortfolioSnapshot(client *api.Client) (*PortfolioSnapshot, error) {
 	}
 	bp := p.BuyingPower.BuyingPower
 	cashBP := p.BuyingPower.CashOnlyBuyingPower
-	if cashBP.IsZero() && bp.IsPositive() {
+	if cashBP.IsZero() && bp.IsPositive() && !cashBalance.IsNegative() {
 		// Older payloads may omit cashOnlyBuyingPower; assume same as bp so the
 		// margin delta is zero rather than spuriously positive.
+		// Only apply when cash >= 0: negative cash means an active margin loan,
+		// so cashOnlyBuyingPower == 0 is genuine, not a missing-field sentinel.
 		cashBP = bp
 	}
 

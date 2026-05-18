@@ -315,6 +315,23 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			expectedEnabled:  false,
 			expectedCapacity: decimal.Zero,
 		},
+		{
+			// cashOnlyBuyingPower == 0 is genuine (not missing) when cash is negative,
+			// meaning the account has a margin loan and all buying power is from margin.
+			name: "genuine zero cashOnlyBP with negative cash (active margin loan)",
+			portfolio: &Portfolio{
+				BuyingPower: BuyingPower{
+					BuyingPower:         decimal.NewFromFloat(10622.09),
+					CashOnlyBuyingPower: decimal.Zero,
+				},
+				Equity: []Equity{
+					{Type: "STOCK", Value: decimal.NewFromFloat(9285.44)},
+					{Type: "CASH", Value: decimal.NewFromFloat(-6.15)},
+				},
+			},
+			expectedEnabled:  true,
+			expectedCapacity: decimal.NewFromFloat(10628.24),
+		},
 	}
 
 	for _, tt := range tests {

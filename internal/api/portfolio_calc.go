@@ -50,12 +50,15 @@ func (p *Portfolio) MarginStatus() (enabled bool, capacity decimal.Decimal) {
 	}
 	bp := p.BuyingPower.BuyingPower
 	cashOnlyBP := p.BuyingPower.CashOnlyBuyingPower
-	if cashOnlyBP.IsZero() && bp.IsPositive() {
+	cash := p.CashBalance()
+	if cashOnlyBP.IsZero() && bp.IsPositive() && !cash.IsNegative() {
 		// Older payloads may omit cashOnlyBuyingPower; fall back to bp so the
 		// margin delta is zero rather than spuriously positive.
+		// Only apply when cash >= 0: if cash is negative, the account has an
+		// active margin loan, meaning cashOnlyBuyingPower == 0 is genuine (not
+		// a missing-field sentinel) and all buying power comes from margin.
 		cashOnlyBP = bp
 	}
-	cash := p.CashBalance()
 
 	marginBP := bp.Sub(cashOnlyBP)
 	if marginBP.IsNegative() {

@@ -176,3 +176,27 @@ func TestMigration_NoSchemaWithAccounts(t *testing.T) {
 		t.Errorf("version = %d, want %d", int(v.Version), CurrentSchemaVersion)
 	}
 }
+
+func TestAddAccount_PathTraversal(t *testing.T) {
+	dir := tmpAppDir(t)
+	appDir := filepath.Join(dir, ".config", "public-terminal")
+	_ = os.WriteFile(filepath.Join(appDir, "accounts.json"), []byte("[]"), 0o644)
+
+	invalidAccounts := []string{
+		"../foo",
+		"../../etc/passwd",
+		"/etc/passwd",
+		"foo/bar",
+		"\\windows\\system32",
+		".",
+		"..",
+		"foo/../acct002",
+		"foo/./acct002",
+	}
+
+	for _, id := range invalidAccounts {
+		if err := AddAccount(id); err == nil {
+			t.Errorf("expected error for path traversal account ID: %s", id)
+		}
+	}
+}

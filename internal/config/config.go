@@ -43,17 +43,31 @@ func cacheDir(accountID string) string {
 	return dir
 }
 
-func norm(id string) string { return strings.ToUpper(strings.TrimSpace(id)) }
+func norm(id string) string {
+	id = strings.ToUpper(strings.TrimSpace(id))
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
+		return ""
+	}
 
-func AccountsFile() string          { return filepath.Join(AppDir(), "accounts.json") }
-func RebalanceConfigPath(id string) string { return filepath.Join(accountDir(id), "rebalance_config.json") }
-func PortfolioCachePath(id string) string  { return filepath.Join(cacheDir(id), "portfolio_cache.json") }
+	cleaned := filepath.Clean(id)
+	if cleaned != id {
+	    return ""
+	}
+
+	return cleaned
+}
+
+func AccountsFile() string { return filepath.Join(AppDir(), "accounts.json") }
+func RebalanceConfigPath(id string) string {
+	return filepath.Join(accountDir(id), "rebalance_config.json")
+}
+func PortfolioCachePath(id string) string { return filepath.Join(cacheDir(id), "portfolio_cache.json") }
 func IndexCachePath(id, index string) string {
 	return filepath.Join(cacheDir(id), "constituents_"+strings.ToUpper(index)+".json")
 }
-func RebalanceLogPath(id string) string  { return filepath.Join(cacheDir(id), "rebalance.log") }
-func TodayBuysPath(id string) string     { return filepath.Join(cacheDir(id), "today_buys.json") }
-func SkipFilePath(id string) string      { return filepath.Join(cacheDir(id), "skip_next_rebalance") }
+func RebalanceLogPath(id string) string   { return filepath.Join(cacheDir(id), "rebalance.log") }
+func TodayBuysPath(id string) string      { return filepath.Join(cacheDir(id), "today_buys.json") }
+func SkipFilePath(id string) string       { return filepath.Join(cacheDir(id), "skip_next_rebalance") }
 func MarketCapCachePath(id string) string { return filepath.Join(cacheDir(id), "market_caps.json") }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,10 @@
 package rebalance
 
 import (
+	"bytes"
+	"log"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -104,6 +107,7 @@ func TestTopNByMarketCap(t *testing.T) {
 		marketCaps map[string]float64
 		n          int
 		want       []string
+		wantLog    string // non-empty substring expected in log output
 	}{
 		{
 			name:       "basic top 3",
@@ -146,14 +150,21 @@ func TestTopNByMarketCap(t *testing.T) {
 			marketCaps: map[string]float64{"MEGA": 2e12, "TINY": 5e8},
 			n:          2,
 			want:       []string{"MEGA", "TINY"},
+			wantLog:    "Top 2 stocks: largest=MEGA",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			if tt.wantLog != "" {
+				origWriter := log.Writer()
+				log.SetOutput(&logBuf)
+				defer log.SetOutput(origWriter)
+			}
 			got := TopNByMarketCap(tt.tickers, tt.marketCaps, tt.n)
-			if len(got) == 0 && len(tt.want) == 0 {
-				return // empty slices match
+			if tt.wantLog != "" && !strings.Contains(logBuf.String(), tt.wantLog) {
+				t.Errorf("log output %q does not contain %q", logBuf.String(), tt.wantLog)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("TopNByMarketCap() = %v, want %v", got, tt.want)

@@ -10,7 +10,7 @@ import (
 	"github.com/ks1686/public-terminal/internal/tui"
 )
 
-const version = "0.5.2"
+const version = "0.5.3"
 
 func main() {
 	var (
@@ -82,8 +82,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "no account configured; run public-terminal (TUI) to set up")
 			os.Exit(1)
 		}
-		if err := rebalance.Run(acct, *dryRun); err != nil {
-			fmt.Fprintln(os.Stderr, "rebalance failed:", err)
+		// When --account is explicit, run only that account.
+		// When defaulting to accounts[0], run all accounts that have rebalance enabled.
+		targets := []string{acct}
+		if *accountID == "" && len(accounts) > 1 {
+			targets = accounts
+		}
+		failed := false
+		for _, a := range targets {
+			if err := rebalance.Run(a, *dryRun); err != nil {
+				fmt.Fprintf(os.Stderr, "rebalance failed for account %s: %v\n", a, err)
+				failed = true
+			}
+		}
+		if failed {
 			os.Exit(1)
 		}
 		return

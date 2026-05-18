@@ -109,3 +109,160 @@ func TestTopNByMarketCap(t *testing.T) {
 		t.Errorf("unexpected top 3: %v", result)
 	}
 }
+
+func TestComputeDelta_Crypto(t *testing.T) {
+	// target is 10, current is 8. Delta is 2.
+	// For EQUITY, min order is $5, so delta=2 is ignored.
+	// For CRYPTO, min order is $1, so delta=2 triggers a BUY.
+	targetVal := decimal.NewFromFloat(10)
+	currentVal := decimal.NewFromFloat(8)
+	threshold := decimal.NewFromFloat(1) // small threshold
+
+	specCrypto := ComputeDelta("BTC", "CRYPTO", targetVal, currentVal, threshold)
+	if specCrypto == nil {
+		t.Fatal("expected non-nil spec for CRYPTO delta > $1")
+	}
+	if specCrypto.Side != "BUY" {
+		t.Errorf("Side = %q, want BUY", specCrypto.Side)
+	}
+	if specCrypto.DollarAmount.String() != "2" {
+		t.Errorf("DollarAmount = %s, want 2", specCrypto.DollarAmount)
+	}
+
+	specEquity := ComputeDelta("AAPL", "EQUITY", targetVal, currentVal, threshold)
+	if specEquity != nil {
+		t.Fatalf("expected nil spec for EQUITY delta < $5, got %v", specEquity)
+	}
+}
+
+func TestComputeDelta_ThresholdPercentage(t *testing.T) {
+	// Target is 10000. RebalanceThresholdPct is 0.005. Target threshold is 10000 * 0.005 = 50.
+	// Current is 9960. Delta is 40.
+	// 40 is greater than $5 min order and threshold parameter (0), but less than 50 (percentage threshold).
+	targetVal := decimal.NewFromFloat(10000)
+	currentVal := decimal.NewFromFloat(9960)
+	threshold := decimal.NewFromFloat(0)
+
+	spec := ComputeDelta("SPY", "EQUITY", targetVal, currentVal, threshold)
+	if spec != nil {
+		t.Fatalf("expected nil spec since delta (40) < percentage threshold (50), got %v", spec)
+	}
+
+	// Current is 9940. Delta is 60.
+	// 60 is > 50, so it should trigger a BUY.
+	currentVal2 := decimal.NewFromFloat(9940)
+	spec2 := ComputeDelta("SPY", "EQUITY", targetVal, currentVal2, threshold)
+	if spec2 == nil {
+		t.Fatal("expected non-nil spec since delta (60) > percentage threshold (50)")
+	}
+	if spec2.Side != "BUY" {
+		t.Errorf("Side = %q, want BUY", spec2.Side)
+	}
+	if spec2.DollarAmount.String() != "60" {
+		t.Errorf("DollarAmount = %s, want 60", spec2.DollarAmount)
+	}
+}
+
+func TestComputeDelta_SellWithThreshold(t *testing.T) {
+	// target is 10000, current is 10060. Delta is -60.
+	// Percentage threshold is 10000 * 0.005 = 50.
+	// The delta -60 is < -50 (which is the negative driftThreshold).
+	targetVal := decimal.NewFromFloat(10000)
+	currentVal := decimal.NewFromFloat(10060)
+	threshold := decimal.NewFromFloat(0)
+
+	spec := ComputeDelta("MSFT", "EQUITY", targetVal, currentVal, threshold)
+
+	if spec == nil {
+		t.Fatal("expected non-nil spec since delta (-60) triggers a SELL")
+	}
+	if spec.Side != "SELL" {
+		t.Errorf("Side = %q, want SELL", spec.Side)
+	}
+	if spec.DollarAmount.String() != "60" {
+		t.Errorf("DollarAmount = %s, want 60", spec.DollarAmount)
+	}
+
+	// Current is 10040. Delta is -40.
+	// -40 is not < -50, so it should be ignored.
+	currentVal2 := decimal.NewFromFloat(10040)
+	spec2 := ComputeDelta("MSFT", "EQUITY", targetVal, currentVal2, threshold)
+	if spec2 != nil {
+		t.Fatalf("expected nil spec since delta (-40) does not trigger a SELL against threshold 50")
+	}
+}
+
+func TestComputeStockWeights_Error(t *testing.T) {
+	// Test case: all market caps are zero
+	tickers := []string{"AAPL", "MSFT"}
+	caps := map[string]float64{
+		"AAPL": 0.0,
+		"MSFT": 0.0,
+	}
+	weights, err := ComputeStockWeights(tickers, caps)
+	if err == nil {
+		t.Error("expected error when all market caps are zero")
+	}
+	if weights != nil {
+		t.Error("expected nil weights when error is returned")
+	}
+
+	// Test case: no tickers
+	tickersEmpty := []string{}
+	capsEmpty := map[string]float64{}
+	weights, err = ComputeStockWeights(tickersEmpty, capsEmpty)
+	if err == nil {
+		t.Error("expected error when there are no tickers")
+	}
+	if weights != nil {
+		t.Error("expected nil weights when error is returned")
+	}
+}
+
+func TestComputeStockWeights_IgnoreNegativeAndMissing(t *testing.T) {
+	tickers := []string{"AAPL", "MSFT", "GOOGL", "MISSING"}
+	caps := map[string]float64{
+		"AAPL":  3000,
+		"MSFT":  -2500, // Negative market cap
+		"GOOGL": 1000,
+		// "MISSING" is intentionally omitted from the map
+		"EXTRA": 5000, // Extra ticker not in the list
+	}
+	weights, err := ComputeStockWeights(tickers, caps)
+	if err != nil {
+		t.Fatalf("ComputeStockWeights: %v", err)
+	}
+
+	if len(weights) != 2 {
+		t.Errorf("expected 2 weights, got %d", len(weights))
+	}
+
+	if _, ok := weights["AAPL"]; !ok {
+		t.Error("expected AAPL to be in weights")
+	}
+	if _, ok := weights["GOOGL"]; !ok {
+		t.Error("expected GOOGL to be in weights")
+	}
+
+	if _, ok := weights["MSFT"]; ok {
+		t.Error("expected MSFT to be ignored due to negative market cap")
+	}
+	if _, ok := weights["MISSING"]; ok {
+		t.Error("expected MISSING to be ignored due to missing market cap")
+	}
+	if _, ok := weights["EXTRA"]; ok {
+		t.Error("expected EXTRA to be ignored as it is not in the tickers list")
+	}
+
+	// Calculate expected weights manually: AAPL (3000), GOOGL (1000) -> total 4000
+	// AAPL weight = 0.75, GOOGL weight = 0.25
+	aaplWeight := decimal.NewFromFloat(0.75)
+	googlWeight := decimal.NewFromFloat(0.25)
+
+	if !weights["AAPL"].Equal(aaplWeight) {
+		t.Errorf("expected AAPL weight %s, got %s", aaplWeight, weights["AAPL"])
+	}
+	if !weights["GOOGL"].Equal(googlWeight) {
+		t.Errorf("expected GOOGL weight %s, got %s", googlWeight, weights["GOOGL"])
+	}
+}

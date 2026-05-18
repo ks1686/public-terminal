@@ -104,6 +104,37 @@ func TestPortfolio_EquityExCash(t *testing.T) {
 			},
 			expected: decimal.NewFromFloat(300.0),
 		},
+		{
+			name: "cash and other types",
+			portfolio: &Portfolio{
+				Equity: []Equity{
+					{Type: "CASH", Value: decimal.NewFromFloat(100.50)},
+					{Type: "STOCK", Value: decimal.NewFromFloat(200.25)},
+					{Type: "CRYPTO", Value: decimal.NewFromFloat(50.25)},
+				},
+			},
+			expected: decimal.NewFromFloat(250.50),
+		},
+		{
+			name: "no cash, multiple other types",
+			portfolio: &Portfolio{
+				Equity: []Equity{
+					{Type: "STOCK", Value: decimal.NewFromFloat(300.00)},
+					{Type: "OPTION", Value: decimal.NewFromFloat(150.00)},
+				},
+			},
+			expected: decimal.NewFromFloat(450.00),
+		},
+		{
+			name: "negative non-cash equity",
+			portfolio: &Portfolio{
+				Equity: []Equity{
+					{Type: "STOCK", Value: decimal.NewFromFloat(300.00)},
+					{Type: "OPTION", Value: decimal.NewFromFloat(-50.00)},
+				},
+			},
+			expected: decimal.NewFromFloat(250.00),
+		},
 	}
 
 	for _, tt := range tests {
@@ -189,13 +220,12 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(200.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(100.0), // MarginBP = 100
+					CashOnlyBuyingPower: decimal.NewFromFloat(100.0),
 				},
 				Equity: []Equity{
-					{Type: "CASH", Value: decimal.NewFromFloat(50.0)}, // Cash = 50, ExCash = 0, ExCash+Cash = 50. loan = 50 - 100 = -50 -> 0.
+					{Type: "CASH", Value: decimal.NewFromFloat(50.0)},
 				},
 			},
-			// capacity = loan + MarginBP = 0 + 100 = 100
 			expectedEnabled:  true,
 			expectedCapacity: decimal.NewFromFloat(100.0),
 		},
@@ -204,14 +234,13 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(200.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(100.0), // MarginBP = 100
+					CashOnlyBuyingPower: decimal.NewFromFloat(100.0),
 				},
 				Equity: []Equity{
 					{Type: "STOCK", Value: decimal.NewFromFloat(200.0)},
-					{Type: "CASH", Value: decimal.NewFromFloat(50.0)}, // Cash = 50, ExCash = 200. Total = 250. loan = 250 - 100 = 150.
+					{Type: "CASH", Value: decimal.NewFromFloat(50.0)},
 				},
 			},
-			// capacity = loan + MarginBP = 150 + 100 = 250
 			expectedEnabled:  true,
 			expectedCapacity: decimal.NewFromFloat(250.0),
 		},
@@ -220,13 +249,12 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(100.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(100.0), // MarginBP = 0
+					CashOnlyBuyingPower: decimal.NewFromFloat(100.0),
 				},
 				Equity: []Equity{
-					{Type: "CASH", Value: decimal.NewFromFloat(-50.0)}, // loan = 50
+					{Type: "CASH", Value: decimal.NewFromFloat(-50.0)},
 				},
 			},
-			// capacity = loan + MarginBP = 50 + 0 = 50
 			expectedEnabled:  true,
 			expectedCapacity: decimal.NewFromFloat(50.0),
 		},
@@ -235,13 +263,12 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(50.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(100.0), // MarginBP = -50 -> 0
+					CashOnlyBuyingPower: decimal.NewFromFloat(100.0),
 				},
 				Equity: []Equity{
 					{Type: "CASH", Value: decimal.NewFromFloat(-50.0)},
 				},
 			},
-			// MarginBP is 0. enabled via cash.IsNegative(). loan = 50. capacity = 50 + 0 = 50.
 			expectedEnabled:  true,
 			expectedCapacity: decimal.NewFromFloat(50.0),
 		},
@@ -250,32 +277,26 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(150.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(50.0), // MarginBP = 100
+					CashOnlyBuyingPower: decimal.NewFromFloat(50.0),
 				},
 				Equity: []Equity{
 					{Type: "STOCK", Value: decimal.NewFromFloat(20.0)},
 					{Type: "CASH", Value: decimal.NewFromFloat(30.0)},
-				}, // ExCash=20, Cash=30. ExCash+Cash = 50. loan = 50 - 100 = -50 -> 0. capacity = 0 + 100 = 100
+				},
 			},
 			expectedEnabled:  true,
 			expectedCapacity: decimal.NewFromFloat(100.0),
 		},
 		{
-			name: "capacity is negative (should be zeroed)",
+			name: "margin remains disabled when effective margin buying power is zero",
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(50.0),
-					CashOnlyBuyingPower: decimal.NewFromFloat(100.0), // MarginBP = -50 -> 0
+					CashOnlyBuyingPower: decimal.NewFromFloat(100.0),
 				},
 				Equity: []Equity{
-					{Type: "CASH", Value: decimal.NewFromFloat(0.0)},
+					{Type: "CASH", Value: decimal.Zero},
 				},
-				// enabled is false... Wait, if marginBP=0 and cash=0, enabled=false -> returns early.
-				// We need enabled=true, meaning cash is negative or marginBP is positive.
-				// If cash < 0, enabled=true. marginBP=0. loan = cash.Neg() = >0. capacity = loan + marginBP > 0.
-				// If marginBP > 0, enabled=true. loan >= 0. capacity = loan + marginBP >= marginBP > 0.
-				// Actually, capacity can never be negative because loan >= 0 and marginBP >= 0!
-				// Line 79-81 `if capacity.IsNegative() { capacity = decimal.Zero }` is defensively written and practically unreachable.
 			},
 			expectedEnabled:  false,
 			expectedCapacity: decimal.Zero,
@@ -285,7 +306,7 @@ func TestPortfolio_MarginStatus(t *testing.T) {
 			portfolio: &Portfolio{
 				BuyingPower: BuyingPower{
 					BuyingPower:         decimal.NewFromFloat(100.0),
-					CashOnlyBuyingPower: decimal.Zero, // Fallback makes it 100, so MarginBP = 0
+					CashOnlyBuyingPower: decimal.Zero,
 				},
 				Equity: []Equity{
 					{Type: "CASH", Value: decimal.NewFromFloat(50.0)},

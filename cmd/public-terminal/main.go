@@ -10,7 +10,7 @@ import (
 	"github.com/ks1686/public-terminal/internal/tui"
 )
 
-const version = "0.5.0"
+const version = "0.5.1"
 
 func main() {
 	var (

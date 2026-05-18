@@ -804,12 +804,12 @@ func (m Model) renderStatus() string {
 }
 
 func (m Model) renderKeyHints() string {
-	hint := "tab/shift+tab pane  alt+arrows move pane  ↑↓/j/k row  q quit  r refresh  b/s order  v/c order  h history"
+	hint := "tab/shift+tab pane  alt+arrows move pane  ↑↓/j/k row  q quit  r refresh  b/s order  v/c order  h history  t toggle timer  e install/remove schedule  x skip rebalance  R rebalance now  S rebal config  ctrl+←/→ acct  ctrl+a manage"
 	if m.width < 100 {
-		hint = "tab pane  alt+arrows pane  ↑↓/j/k row  q/r  b/s  v/c  h  R/S"
+		hint = "tab pane  alt+arrows pane  ↑↓/j/k row  q/r  b/s  v/c  h  t  e  x  R/S  ctrl+←/→ acct  ctrl+a"
 	}
 	if m.width < 72 {
-		hint = "tab pane  alt+arrows  ↑↓ row  q/r  b/s  v/c  h  R/S"
+		hint = "tab pane  alt+arrows  ↑↓ row  q/r  b/s  v/c  h  t/e/x  R/S  ctrl+←/→  ctrl+a"
 	}
 	return theme.KeyHint.Width(max(1, m.width)).Render(truncateForWidth(hint, m.width))
 }

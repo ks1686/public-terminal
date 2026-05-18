@@ -139,12 +139,28 @@ func fetchDJIAOfficial() ([]string, map[string]float64, error) {
 }
 
 func fetchVTOfficial() ([]string, map[string]float64, error) {
-	url := "https://www.ishares.com/us/products/239600/ISHARES-MSCI-ACWI-ETF/1467271812596.ajax?fileType=csv&fileName=ACWI_holdings&dataType=fund"
-	body, err := fetchBytes(url, nil)
+	// SSGA SPGM tracks MSCI ACWI IMI — same global universe as FTSE Global All Cap.
+	// iShares ACWI is bot-blocked; SSGA SPGM XLSX downloads work without challenge.
+	url := "https://www.ssga.com/us/en/intermediary/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spgm.xlsx"
+	body, err := fetchBytes(url, map[string]string{"Referer": "https://www.ssga.com/"})
 	if err != nil {
 		return nil, nil, err
 	}
-	return parseACWICSV(body)
+	return parseSPGMXLSX(body)
+}
+
+func parseSPGMXLSX(body []byte) ([]string, map[string]float64, error) {
+	f, err := os.CreateTemp("", "pt-spgm-*.xlsx")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	f.Close()
+	return parseSPGMXLSXFile(f.Name())
 }
 
 func fetchSPUSOfficial() ([]string, map[string]float64, error) {
@@ -274,67 +290,6 @@ func parseSSGAXLSX(body []byte) ([]string, map[string]float64, error) {
 	return parseSSGAXLSXFile(f.Name())
 }
 
-func parseACWICSV(body []byte) ([]string, map[string]float64, error) {
-	r := csv.NewReader(strings.NewReader(string(body)))
-	for i := 0; i < 9; i++ {
-		if _, err := r.Read(); err != nil {
-			return nil, nil, fmt.Errorf("ACWI CSV: not enough rows to skip")
-		}
-	}
-	header, err := r.Read()
-	if err != nil {
-		return nil, nil, fmt.Errorf("ACWI CSV: missing header")
-	}
-	colIdx := make(map[string]int)
-	for i, h := range header {
-		colIdx[strings.TrimSpace(h)] = i
-	}
-	tickerCol := colIdx["Ticker"]
-	assetClassCol := colIdx["Asset Class"]
-	marketValueCol, hasMarketValue := colIdx["Market Value"]
-
-	caps := map[string]float64{}
-	for {
-		row, err := r.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			continue
-		}
-		if assetClassCol > 0 && assetClassCol < len(row) {
-			if !strings.Contains(row[assetClassCol], "Equity") {
-				continue
-			}
-		}
-		if tickerCol >= len(row) {
-			continue
-		}
-		rawTicker := strings.TrimSpace(row[tickerCol])
-		ticker := normIShares(rawTicker)
-		// Only accept pure-alpha tickers (≤5 chars) for US-listed holdings
-		if !((isAlpha(ticker) && len(ticker) <= 5) || iSharesToBroker[ticker] != "") {
-			continue
-		}
-		if hasMarketValue && marketValueCol < len(row) {
-			mv := parseFloat(strings.ReplaceAll(row[marketValueCol], ",", ""))
-			if mv > 0 {
-				if existing, ok := caps[ticker]; !ok || mv > existing {
-					caps[ticker] = mv
-				}
-			}
-		}
-	}
-	tickers := make([]string, 0, len(caps))
-	for t := range caps {
-		tickers = append(tickers, t)
-	}
-	if len(tickers) == 0 {
-		return nil, nil, fmt.Errorf("ACWI CSV: no usable tickers found")
-	}
-	weights := normalizeWeights(caps)
-	return tickers, weights, nil
-}
 
 func parseSPUSCSV(body []byte) ([]string, map[string]float64, error) {
 	r := csv.NewReader(strings.NewReader(string(body)))
@@ -656,15 +611,6 @@ func isStockTicker(s string) bool {
 	}
 	for _, ch := range s {
 		if !unicode.IsLetter(ch) && ch != '.' {
-			return false
-		}
-	}
-	return true
-}
-
-func isAlpha(s string) bool {
-	for _, ch := range s {
-		if !unicode.IsLetter(ch) {
 			return false
 		}
 	}

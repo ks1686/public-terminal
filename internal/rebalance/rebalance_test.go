@@ -109,3 +109,85 @@ func TestTopNByMarketCap(t *testing.T) {
 		t.Errorf("unexpected top 3: %v", result)
 	}
 }
+
+func TestComputeDelta_Crypto(t *testing.T) {
+	// target is 10, current is 8. Delta is 2.
+	// For EQUITY, min order is $5, so delta=2 is ignored.
+	// For CRYPTO, min order is $1, so delta=2 triggers a BUY.
+	targetVal := decimal.NewFromFloat(10)
+	currentVal := decimal.NewFromFloat(8)
+	threshold := decimal.NewFromFloat(1) // small threshold
+
+	specCrypto := ComputeDelta("BTC", "CRYPTO", targetVal, currentVal, threshold)
+	if specCrypto == nil {
+		t.Fatal("expected non-nil spec for CRYPTO delta > $1")
+	}
+	if specCrypto.Side != "BUY" {
+		t.Errorf("Side = %q, want BUY", specCrypto.Side)
+	}
+	if specCrypto.DollarAmount.String() != "2" {
+		t.Errorf("DollarAmount = %s, want 2", specCrypto.DollarAmount)
+	}
+
+	specEquity := ComputeDelta("AAPL", "EQUITY", targetVal, currentVal, threshold)
+	if specEquity != nil {
+		t.Fatalf("expected nil spec for EQUITY delta < $5, got %v", specEquity)
+	}
+}
+
+func TestComputeDelta_ThresholdPercentage(t *testing.T) {
+	// Target is 10000. RebalanceThresholdPct is 0.005. Target threshold is 10000 * 0.005 = 50.
+	// Current is 9960. Delta is 40.
+	// 40 is greater than $5 min order and threshold parameter (0), but less than 50 (percentage threshold).
+	targetVal := decimal.NewFromFloat(10000)
+	currentVal := decimal.NewFromFloat(9960)
+	threshold := decimal.NewFromFloat(0)
+
+	spec := ComputeDelta("SPY", "EQUITY", targetVal, currentVal, threshold)
+	if spec != nil {
+		t.Fatalf("expected nil spec since delta (40) < percentage threshold (50), got %v", spec)
+	}
+
+	// Current is 9940. Delta is 60.
+	// 60 is > 50, so it should trigger a BUY.
+	currentVal2 := decimal.NewFromFloat(9940)
+	spec2 := ComputeDelta("SPY", "EQUITY", targetVal, currentVal2, threshold)
+	if spec2 == nil {
+		t.Fatal("expected non-nil spec since delta (60) > percentage threshold (50)")
+	}
+	if spec2.Side != "BUY" {
+		t.Errorf("Side = %q, want BUY", spec2.Side)
+	}
+	if spec2.DollarAmount.String() != "60" {
+		t.Errorf("DollarAmount = %s, want 60", spec2.DollarAmount)
+	}
+}
+
+func TestComputeDelta_SellWithThreshold(t *testing.T) {
+	// target is 10000, current is 10060. Delta is -60.
+	// Percentage threshold is 10000 * 0.005 = 50.
+	// The delta -60 is < -50 (which is the negative driftThreshold).
+	targetVal := decimal.NewFromFloat(10000)
+	currentVal := decimal.NewFromFloat(10060)
+	threshold := decimal.NewFromFloat(0)
+
+	spec := ComputeDelta("MSFT", "EQUITY", targetVal, currentVal, threshold)
+
+	if spec == nil {
+		t.Fatal("expected non-nil spec since delta (-60) triggers a SELL")
+	}
+	if spec.Side != "SELL" {
+		t.Errorf("Side = %q, want SELL", spec.Side)
+	}
+	if spec.DollarAmount.String() != "60" {
+		t.Errorf("DollarAmount = %s, want 60", spec.DollarAmount)
+	}
+
+	// Current is 10040. Delta is -40.
+	// -40 is not < -50, so it should be ignored.
+	currentVal2 := decimal.NewFromFloat(10040)
+	spec2 := ComputeDelta("MSFT", "EQUITY", targetVal, currentVal2, threshold)
+	if spec2 != nil {
+		t.Fatalf("expected nil spec since delta (-40) does not trigger a SELL against threshold 50")
+	}
+}

@@ -233,14 +233,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case tea.MouseButtonWheelDown:
 			m.MoveDown(1)
 		case tea.MouseButtonLeft:
-			if msg.Action == tea.MouseActionRelease {
-				// Assuming msg.Y is relative to the table (0 = header)
-				if msg.Y >= 1 && msg.Y <= m.viewport.Height {
-					idx := msg.Y - 1 + m.viewport.YOffset
-					if idx >= 0 && idx < len(m.rows) {
-						m.SetCursor(idx)
-					}
-				}
+			if msg.Action != tea.MouseActionRelease {
+				break
+			}
+			// Assuming msg.Y is relative to the table (0 = header)
+			if msg.Y < 1 || msg.Y > m.viewport.Height {
+				break
+			}
+			idx := msg.Y - 1 + m.viewport.YOffset
+			if idx >= 0 && idx < len(m.rows) {
+				m.SetCursor(idx)
 			}
 		}
 	}

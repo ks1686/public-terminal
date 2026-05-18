@@ -57,7 +57,7 @@ func parseSSGAXLSXFile(path string) ([]string, map[string]float64, error) {
 		}
 		tickers = append(tickers, ticker)
 		if weightCol >= 0 && weightCol < len(row.Cells) {
-			if w := parseWeightPct(row.Cells[weightCol].String()); w > 0 {
+			if w := parseSSGAWeightPct(row.Cells[weightCol].String()); w > 0 {
 				rawWeights[ticker] = w
 			}
 		}
@@ -67,6 +67,21 @@ func parseSSGAXLSXFile(path string) ([]string, map[string]float64, error) {
 		weights = normalizeWeights(rawWeights)
 	}
 	return dedupe(tickers), weights, nil
+}
+
+// parseSSGAWeightPct parses SSGA holdings weight cells.
+// SSGA files store weights as plain percent numbers (e.g. "4.797" means 4.797%, "0.823"
+// means 0.823%). The generic parseWeightPct only divides by 100 when the value is ≥ 1,
+// which causes holdings under 1% to be treated as 100× heavier than they should be
+// (0.823 → 82.3% instead of 0.823%). This function always divides by 100.
+func parseSSGAWeightPct(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "%")
+	f := parseFloat(s)
+	if f <= 0 {
+		return 0
+	}
+	return f / 100.0
 }
 
 // parseSPGMXLSXFile parses the SSGA SPGM (Portfolio MSCI Global Stock Market ETF) holdings XLSX.
@@ -118,7 +133,7 @@ func parseSPGMXLSXFile(path string) ([]string, map[string]float64, error) {
 		if len(row.Cells) <= colWeight {
 			continue
 		}
-		w := parseWeightPct(row.Cells[colWeight].String())
+		w := parseSSGAWeightPct(row.Cells[colWeight].String())
 		if w <= 0 {
 			continue
 		}

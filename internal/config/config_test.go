@@ -190,6 +190,8 @@ func TestAddAccount_PathTraversal(t *testing.T) {
 		"\\windows\\system32",
 		".",
 		"..",
+		"foo/../acct002",
+		"foo/./acct002",
 	}
 
 	for _, id := range invalidAccounts {

@@ -45,14 +45,16 @@ func cacheDir(accountID string) string {
 
 func norm(id string) string {
 	id = strings.ToUpper(strings.TrimSpace(id))
-	if id == "" {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
 		return ""
 	}
-	id = filepath.Clean(id)
-	if id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
-		return ""
+
+	cleaned := filepath.Clean(id)
+	if cleaned != id {
+	    return ""
 	}
-	return id
+
+	return cleaned
 }
 
 func AccountsFile() string { return filepath.Join(AppDir(), "accounts.json") }

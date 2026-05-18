@@ -103,7 +103,7 @@ func (c *Client) GetPortfolio() (*Portfolio, error) {
 	}
 	var p Portfolio
 	if err := json.Unmarshal(out, &p); err != nil {
-		return nil, fmt.Errorf("parsing portfolio JSON: %w\nraw: %.200s", err, out)
+		return nil, fmt.Errorf("parsing portfolio JSON: %w", err)
 	}
 	return &p, nil
 }
@@ -306,9 +306,15 @@ func (c *Client) GetHistoricBars(symbol, period, aggregation string) ([]Bar, err
 	if listErr := json.Unmarshal(out, &bars); listErr == nil {
 		return bars, nil
 	}
-	// Neither shape parsed — surface whichever error we have, with raw context.
+	// Neither shape parsed — surface whichever error we have with request context.
 	if respErr != nil {
-		return nil, fmt.Errorf("parsing bars (session shape): %w\nraw: %.500s", respErr, out)
+		return nil, fmt.Errorf(
+			"parsing bars (session shape) for symbol=%s period=%s aggregation=%s: %w",
+			strings.ToUpper(symbol), strings.ToUpper(period), strings.ToUpper(aggregation), respErr,
+		)
 	}
-	return nil, fmt.Errorf("bars response had no points; raw: %.500s", out)
+	return nil, fmt.Errorf(
+		"bars response had no points for symbol=%s period=%s aggregation=%s",
+		strings.ToUpper(symbol), strings.ToUpper(period), strings.ToUpper(aggregation),
+	)
 }

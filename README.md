@@ -1,6 +1,12 @@
 # Public Terminal
 
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/ks1686/public-terminal)](https://github.com/ks1686/public-terminal/releases/latest)
+
 A btop/htop-style trading TUI for [Public.com](https://public.com), with direct index investing and automated daily portfolio rebalancing. Built with Go (Bubble Tea + Lipgloss).
+
+If this is useful, star the repo so others can find it.
 
 ---
 
@@ -62,11 +68,11 @@ Pre-built binaries for Linux and macOS (amd64/arm64) are attached to each [GitHu
 
 ```bash
 # Linux amd64
-curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/download/v0.4.0/public-terminal-linux-amd64
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-linux-amd64
 chmod +x public-terminal
 
 # macOS arm64 (Apple Silicon)
-curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/download/v0.4.0/public-terminal-darwin-arm64
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-darwin-arm64
 chmod +x public-terminal
 ```
 

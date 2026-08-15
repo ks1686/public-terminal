@@ -25,6 +25,7 @@ type KeyMap struct {
 	PrevAccount   key.Binding
 	NextAccount   key.Binding
 	ManageAccts   key.Binding
+	Help          key.Binding
 }
 
 var DefaultKeyMap = KeyMap{
@@ -49,4 +50,5 @@ var DefaultKeyMap = KeyMap{
 	PrevAccount:   key.NewBinding(key.WithKeys("ctrl+left"), key.WithHelp("ctrl+←", "prev account")),
 	NextAccount:   key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "next account")),
 	ManageAccts:   key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "manage accounts")),
+	Help:          key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 }

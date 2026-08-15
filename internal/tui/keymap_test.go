@@ -41,6 +41,7 @@ func TestKeyMapAllBindings(t *testing.T) {
 		{"PrevAccount", km.PrevAccount.Help().Key},
 		{"NextAccount", km.NextAccount.Help().Key},
 		{"ManageAccts", km.ManageAccts.Help().Key},
+		{"Help", km.Help.Help().Key},
 	}
 	for _, b := range bindings {
 		if b.key == "" {

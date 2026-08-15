@@ -18,18 +18,20 @@ import (
 )
 
 const (
-	userAgent     = "Mozilla/5.0 (compatible; public-terminal/2.0)"
-	fetchTimeout  = 30 * time.Second
-	bugReportURL  = "https://github.com/ks1686/public-terminal/issues"
+	userAgent        = "Mozilla/5.0 (compatible; public-terminal/2.0)"
+	fetchTimeout     = 30 * time.Second
+	maxHTTPBodyBytes = 20 << 20
+	staleIndexMaxAge = 7 * 24 * time.Hour
+	bugReportURL     = "https://github.com/ks1686/public-terminal/issues"
 )
 
 // Index identifiers (canonical, stored in rebalance_config.json).
 const (
-	IndexSP500    = "SP500"
-	IndexNAS100   = "NASDAQ100"
-	IndexDJIA     = "DJIA"
-	IndexVT       = "FTSE_GLOBAL_ALL_CAP"
-	IndexSPUS     = "SPUS"
+	IndexSP500  = "SP500"
+	IndexNAS100 = "NASDAQ100"
+	IndexDJIA   = "DJIA"
+	IndexVT     = "FTSE_GLOBAL_ALL_CAP"
+	IndexSPUS   = "SPUS"
 )
 
 // SupportedIndexes maps index ID → display name.
@@ -48,8 +50,8 @@ var SupportedIndexList = []string{IndexSP500, IndexNAS100, IndexDJIA, IndexVT, I
 var ETFToIndex = map[string]string{
 	"SPY": IndexSP500, "VOO": IndexSP500, "IVV": IndexSP500, "SPLG": IndexSP500,
 	"QQQ": IndexNAS100, "QQQM": IndexNAS100, "ONEQ": IndexNAS100,
-	"DIA": IndexDJIA,
-	"VT":  IndexVT,
+	"DIA":  IndexDJIA,
+	"VT":   IndexVT,
 	"SPUS": IndexSPUS,
 }
 
@@ -80,13 +82,13 @@ func FetchConstituents(index, accountID string, cachePath string) (tickers []str
 	}
 	log.Printf("WARNING  %s Wikipedia fallback failed: %v — trying stale cache", index, err)
 
-	// 3. Stale cache
-	tickers, weights, _, err = loadIndexCache(cachePath)
+	// 3. Stale cache (refuse if older than 7 days)
+	tickers, weights, err = loadFreshOrStaleCache(cachePath)
 	if err == nil {
 		log.Printf("WARNING  Using stale %s constituent cache. Please report at %s", index, bugReportURL)
 		return
 	}
-	return nil, nil, fmt.Errorf("all sources for %s constituents failed and no cache available", index)
+	return nil, nil, fmt.Errorf("all sources for %s constituents failed: %w", index, err)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,8 +240,8 @@ func parseISharesCSV(body []byte, skipRows int, weightCol string) ([]string, map
 func parseInvescoJSON(body []byte) ([]string, map[string]float64, error) {
 	var data struct {
 		Holdings []struct {
-			Ticker                  string  `json:"ticker"`
-			SecurityTypeCode        string  `json:"securityTypeCode"`
+			Ticker                     string  `json:"ticker"`
+			SecurityTypeCode           string  `json:"securityTypeCode"`
 			PercentageOfTotalNetAssets float64 `json:"percentageOfTotalNetAssets"`
 		} `json:"holdings"`
 	}
@@ -289,7 +291,6 @@ func parseSSGAXLSX(body []byte) ([]string, map[string]float64, error) {
 	// Import is handled at the package level
 	return parseSSGAXLSXFile(f.Name())
 }
-
 
 func parseSPUSCSV(body []byte) ([]string, map[string]float64, error) {
 	r := csv.NewReader(strings.NewReader(string(body)))
@@ -540,7 +541,7 @@ func saveIndexCache(cachePath, index string, tickers []string, weights map[strin
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
+	if err := os.WriteFile(cachePath, b, 0o600); err != nil {
 		log.Printf("WARNING  Could not save index cache to %s: %v", cachePath, err)
 		return
 	}
@@ -558,6 +559,17 @@ func loadIndexCache(cachePath string) (tickers []string, weights map[string]floa
 	}
 	t, _ := time.Parse(time.RFC3339, c.UpdatedAt)
 	return c.Tickers, c.Weights, t, nil
+}
+
+func loadFreshOrStaleCache(cachePath string) ([]string, map[string]float64, error) {
+	tickers, weights, updatedAt, err := loadIndexCache(cachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if updatedAt.IsZero() || time.Since(updatedAt) > staleIndexMaxAge {
+		return nil, nil, fmt.Errorf("stale cache older than %s", staleIndexMaxAge)
+	}
+	return tickers, weights, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -583,7 +595,7 @@ func fetchBytes(url string, extraHeaders map[string]string) ([]byte, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes+1))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -618,17 +630,9 @@ func isStockTicker(s string) bool {
 }
 
 func parseWeightPct(s string) float64 {
-	s = strings.TrimSpace(s)
-	isPct := strings.HasSuffix(s, "%")
-	s = strings.TrimSuffix(s, "%")
-	f := parseFloat(s)
-	if f < 0 {
-		return 0
-	}
-	if isPct || f >= 1.0 {
-		return f / 100.0
-	}
-	return f
+	// Holdings files store weights as percent numbers ("0.823" = 0.823%).
+	// Always divide by 100 so names under 1% are not treated as 82.3%.
+	return parseSSGAWeightPct(s)
 }
 
 func parseFloat(s string) float64 {

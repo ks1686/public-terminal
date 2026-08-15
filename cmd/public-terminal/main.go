@@ -10,7 +10,8 @@ import (
 	"github.com/ks1686/public-terminal/internal/tui"
 )
 
-const version = "0.5.4"
+// version is overwritten at release time with -ldflags "-X main.version=...".
+var version = "0.5.4"
 
 func main() {
 	var (

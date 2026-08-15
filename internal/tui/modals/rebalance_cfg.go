@@ -224,13 +224,13 @@ func (m RebalanceCfgModal) trySave() tea.Cmd {
 	return func() tea.Msg {
 		topN, err := strconv.Atoi(strings.TrimSpace(m.topNInput.Value()))
 		if err != nil || topN < 1 {
-			return errMsg{fmt.Errorf("Top-N must be a whole number ≥ 1")}
+			return ErrMsg{Err: fmt.Errorf("Top-N must be a whole number ≥ 1")}
 		}
 		var marginPct float64
 		if m.marginAvailable {
 			marginPct, err = strconv.ParseFloat(strings.TrimSpace(m.marginInput.Value()), 64)
 			if err != nil || marginPct < 0 || marginPct > 1 {
-				return errMsg{fmt.Errorf("Margin must be a number between 0.0 and 1.0")}
+				return ErrMsg{Err: fmt.Errorf("Margin must be a number between 0.0 and 1.0")}
 			}
 		}
 
@@ -244,10 +244,10 @@ func (m RebalanceCfgModal) trySave() tea.Cmd {
 
 		pcts, total, allocErr := m.parseAllocPcts()
 		if allocErr != "" {
-			return errMsg{fmt.Errorf("%s", allocErr)}
+			return ErrMsg{Err: fmt.Errorf("%s", allocErr)}
 		}
 		if total != 100 {
-			return errMsg{fmt.Errorf("Allocations sum to %d%% — must equal 100%%", total)}
+			return ErrMsg{Err: fmt.Errorf("Allocations sum to %d%% — must equal 100%%", total)}
 		}
 
 		allocs := make(map[string]float64, len(pcts))
@@ -265,7 +265,7 @@ func (m RebalanceCfgModal) trySave() tea.Cmd {
 			RebalanceEnabled: m.enabledToggle,
 		}
 		if err := config.SaveRebalanceConfig(m.accountID, cfg); err != nil {
-			return errMsg{err}
+			return ErrMsg{Err: err}
 		}
 		return RebalanceCfgSavedMsg{Cfg: cfg}
 	}

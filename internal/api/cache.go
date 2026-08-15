@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+
+	"github.com/ks1686/public-terminal/internal/config"
 )
 
 // SavePortfolio writes a snapshot to disk. Failures are best-effort and
@@ -16,7 +18,7 @@ func SavePortfolio(path string, p *Portfolio) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return config.WriteFileAtomic(path, b, 0o600)
 }
 
 // LoadPortfolio returns the cached snapshot if present and parseable. A missing

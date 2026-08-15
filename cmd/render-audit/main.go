@@ -1,5 +1,7 @@
+//go:build ignore
+
 // Throwaway: renders every modal + component with realistic data so the views
-// can be eyeballed without a TTY. Delete after use.
+// can be eyeballed without a TTY.
 package main
 
 import (

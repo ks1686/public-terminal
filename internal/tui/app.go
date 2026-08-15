@@ -25,12 +25,19 @@ import (
 // Messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-type portfolioLoadedMsg struct{ p *api.Portfolio }
+type portfolioLoadedMsg struct {
+	p       *api.Portfolio
+	account string
+	gen     int
+}
 type historyLoadedMsg struct {
 	entries   []api.HistoryEntry
 	truncated bool
 }
-type rebalancerRunningMsg struct{ running bool }
+type rebalancerRunningMsg struct {
+	running bool
+	err     error
+}
 type liveTickMsg struct{}
 
 type appErrMsg struct {
@@ -87,8 +94,11 @@ type Model struct {
 	skipPending       bool
 	activePane        paneID
 
-	status      string
-	statusIsErr bool
+	status           string
+	statusIsErr      bool
+	portGen          int
+	showHelp         bool
+	confirmRebalance bool
 }
 
 func NewModel(accounts []string, activeIdx int) *Model {
@@ -173,6 +183,9 @@ func (m Model) Init() tea.Cmd {
 
 func (m *Model) loadPortfolio() tea.Cmd {
 	client := m.activeClient()
+	acct := m.activeAccount()
+	m.portGen++
+	gen := m.portGen
 	if client == nil {
 		return func() tea.Msg {
 			return appErrMsg{
@@ -186,7 +199,7 @@ func (m *Model) loadPortfolio() tea.Cmd {
 		if err != nil {
 			return appErrMsg{err: err, ctx: "portfolio"}
 		}
-		return portfolioLoadedMsg{p: p}
+		return portfolioLoadedMsg{p: p, account: acct, gen: gen}
 	}
 }
 
@@ -233,8 +246,8 @@ func (m *Model) loadRebalancerStatus() tea.Cmd {
 func (m *Model) runRebalanceAsync(dryRun bool) tea.Cmd {
 	acct := m.activeAccount()
 	return func() tea.Msg {
-		_ = rebalance.Run(acct, dryRun)
-		return rebalancerRunningMsg{running: false}
+		err := rebalance.Run(acct, dryRun)
+		return rebalancerRunningMsg{running: false, err: err}
 	}
 }
 
@@ -266,18 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case portfolioLoadedMsg:
-		m.loading = false
-		m.portfolio = msg.p
-		m.applyPortfolio()
-		// Persist for next launch so the UI can paint immediately.
-		if acct := m.activeAccount(); acct != "" {
-			_ = api.SavePortfolio(config.PortfolioCachePath(acct), msg.p)
-			streamSuffix := "  |  STREAMING"
-			m.status = fmt.Sprintf("  %s%s", acct, streamSuffix)
-			m.statusIsErr = false
-		}
-		var cmd tea.Cmd
-		return m, cmd
+		return m.applyPortfolioMsg(msg)
 
 	case historyLoadedMsg:
 		m.modal = modals.NewHistoryModal(msg.entries, msg.truncated, m.width, m.height)
@@ -287,6 +289,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebalancerRunning = false
 		m.rebalancer.Status.SvcActive = false
 		m.rebalancer.Status.LastRun = time.Now().Format("15:04:05")
+		if msg.err != nil {
+			m.status = fmt.Sprintf("rebalance: %v", msg.err)
+			m.statusIsErr = true
+		} else {
+			m.status = "Rebalance finished."
+			m.statusIsErr = false
+		}
 		return m, m.loadPortfolio()
 
 	case liveTickMsg:
@@ -328,7 +337,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Modal routing
 // ─────────────────────────────────────────────────────────────────────────────
 
+func (m Model) applyPortfolioMsg(msg portfolioLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.portGen || msg.account != m.activeAccount() {
+		return m, nil
+	}
+	m.loading = false
+	m.portfolio = msg.p
+	m.applyPortfolio()
+	if msg.account != "" {
+		_ = api.SavePortfolio(config.PortfolioCachePath(msg.account), msg.p)
+		m.status = fmt.Sprintf("  %s  |  LIVE 30s", msg.account)
+		m.statusIsErr = false
+	}
+	return m, nil
+}
+
 func (m Model) updateModal(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.balance.Width = m.width
+		m.rebalancer.Width = m.width
+	case liveTickMsg:
+		return m, tea.Batch(liveTick(), m.loadPortfolio())
+	case portfolioLoadedMsg:
+		return m.applyPortfolioMsg(msg)
+	case appErrMsg:
+		m.loading = false
+		m.status = fmt.Sprintf("%s: %v", msg.ctx, msg.err)
+		m.statusIsErr = true
+		return m, nil
+	case rebalancerRunningMsg:
+		m.rebalancerRunning = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("rebalance: %v", msg.err)
+			m.statusIsErr = true
+		}
+		return m, m.loadPortfolio()
+	}
+
 	next, cmd := m.modal.Update(msg)
 	m.modal = next
 
@@ -396,6 +444,15 @@ func (m Model) updateModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modals.RebalanceCfgClosedMsg:
 		m.modal = nil
 		return m, nil
+
+	case modals.ErrMsg:
+		m.status = msg.Err.Error()
+		m.statusIsErr = true
+		if om, ok := m.modal.(modals.OrderModal); ok {
+			om.SetError(msg.Err.Error())
+			m.modal = om
+		}
+		return m, nil
 	}
 	return m, cmd
 }
@@ -435,7 +492,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	km := m.keys
 
 	switch {
+	case key.Matches(msg, km.Help):
+		m.showHelp = !m.showHelp
+		return m, nil
+
 	case key.Matches(msg, km.Quit):
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
 		return m, tea.Quit
 
 	case key.Matches(msg, km.Refresh):
@@ -525,6 +590,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Rebalancer already running."
 			return m, nil
 		}
+		if !m.confirmRebalance {
+			m.confirmRebalance = true
+			m.status = "Press R again to place live rebalance orders."
+			m.statusIsErr = false
+			return m, nil
+		}
+		m.confirmRebalance = false
 		m.rebalancerRunning = true
 		m.rebalancer.Status.SvcActive = true
 		m.status = "Rebalancer started (this may take a few minutes)."
@@ -632,10 +704,33 @@ func movePane(p paneID, dir string) paneID {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
+	if m.width > 0 && m.height > 0 && (m.width < 80 || m.height < 24) {
+		return fmt.Sprintf("Terminal too small (%dx%d). Need at least 80x24.", m.width, m.height)
+	}
+	if m.showHelp {
+		return m.renderHelp()
+	}
 	if m.modal != nil {
 		return m.renderOverlay()
 	}
 	return m.renderMain()
+}
+
+func (m Model) renderHelp() string {
+	body := strings.Join([]string{
+		theme.Title.Render("Public Terminal"),
+		"",
+		"q quit    r refresh    ? help",
+		"tab / shift+tab  cycle panes    alt+arrows move pane",
+		"↑↓/j/k  move row",
+		"b buy    s sell    v view order    c cancel    h history",
+		"R rebalance now (confirm twice)    S rebalance settings",
+		"t pause/resume schedule    e install/remove    x skip next",
+		"ctrl+←/→ switch account    ctrl+a manage accounts",
+		"",
+		theme.Muted.Render("Press ? or q to close"),
+	}, "\n")
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, theme.ModalBox.Render(body))
 }
 
 func (m Model) renderMain() string {
@@ -813,7 +908,7 @@ func (m Model) renderStatus() string {
 }
 
 func (m Model) renderKeyHints() string {
-	hint := "tab/shift+tab pane  alt+arrows move pane  ↑↓/j/k row  q quit  r refresh  b/s order  v/c order  h history  t toggle timer  e install/remove schedule  x skip rebalance  R rebalance now  S rebal config  ctrl+←/→ acct  ctrl+a manage"
+	hint := "? help  tab pane  alt+arrows  ↑↓ row  q/r  b/s  v/c  h  t/e/x  R/S  ctrl+←/→  ctrl+a"
 	if m.width < 100 {
 		hint = "tab pane  alt+arrows pane  ↑↓/j/k row  q/r  b/s  v/c  h  t  e  x  R/S  ctrl+←/→ acct  ctrl+a"
 	}

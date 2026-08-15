@@ -40,6 +40,7 @@ type appErrMsg struct {
 type rebalancerStatusMsg struct {
 	cfg         config.RebalanceConfig
 	skipPending bool
+	installed   bool
 	active      bool
 	enabled     bool
 	lastRun     string
@@ -208,14 +209,22 @@ func (m *Model) loadRebalancerStatus() tea.Cmd {
 	return func() tea.Msg {
 		cfg := config.LoadRebalanceConfig(acct)
 		_, skipErr := os.Stat(config.SkipFilePath(acct))
-		msg := rebalancerStatusMsg{cfg: cfg, skipPending: skipErr == nil}
-		if config.HasSystemctl() {
+		msg := rebalancerStatusMsg{
+			cfg:         cfg,
+			skipPending: skipErr == nil,
+			installed:   config.ScheduleInstalled(),
+		}
+		switch {
+		case config.HasSystemctl():
 			msg.active = config.SystemctlIsActive(config.TimerUnit)
 			msg.enabled = config.SystemctlIsEnabled(config.TimerUnit)
 			props := config.SystemctlShow(config.TimerUnit,
 				"LastTriggerUSec", "NextElapseUSecRealtime")
 			msg.lastRun = props["LastTriggerUSec"]
 			msg.nextRun = props["NextElapseUSecRealtime"]
+		default:
+			msg.enabled = config.ScheduleEnabled()
+			msg.active = msg.enabled
 		}
 		return msg
 	}
@@ -293,7 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebalanceCfg = msg.cfg
 		m.skipPending = msg.skipPending
 		m.rebalancer.Status.Cfg = msg.cfg
-		m.rebalancer.Status.SvcInstalled = msg.enabled || msg.active // installed if either is true
+		m.rebalancer.Status.SvcInstalled = msg.installed || msg.enabled || msg.active
 		m.rebalancer.Status.SvcEnabled = msg.enabled
 		m.rebalancer.Status.SvcActive = msg.active || m.rebalancerRunning
 		m.rebalancer.Status.SkipPending = msg.skipPending
@@ -833,25 +842,45 @@ func (m *Model) openOrderModal(side string) {
 	}
 	symbol := m.holdings.SelectedSymbol()
 	instrumentType := "EQUITY"
-	if m.activePane == paneCrypto {
+	defaultQty := ""
+	switch m.activePane {
+	case paneCrypto:
 		if s := m.crypto.SelectedSymbol(); s != "" {
 			symbol = s
 		}
 		instrumentType = "CRYPTO"
+	case paneOptions:
+		if side != "SELL" {
+			m.status = "Opening new options is not supported — select a contract and press s to close."
+			m.statusIsErr = true
+			return
+		}
+		occ, qty := m.opts.SelectedContract()
+		if occ == "" {
+			m.status = "No option position selected."
+			m.statusIsErr = true
+			return
+		}
+		symbol = occ
+		instrumentType = "OPTION"
+		defaultQty = qty
 	}
 	m.modal = modals.NewOrderModal(client, side, symbol, instrumentType)
+	if defaultQty != "" {
+		m.modal = m.modal.(modals.OrderModal).WithQuantity(defaultQty)
+	}
 }
 
 // toggleScheduleInstall: install + enable + start, or stop + disable + remove,
 // depending on current systemd state. Mirrors Python action_toggle_enable_rebalancer.
 func (m Model) toggleScheduleInstall() (tea.Model, tea.Cmd) {
-	if !config.HasSystemctl() {
-		m.status = "Install/remove schedule requires systemctl on this platform."
+	if !config.HasScheduleSupport() {
+		m.status = "Install/remove schedule requires systemd or launchd on this platform."
 		m.statusIsErr = true
 		return m, nil
 	}
-	if config.SystemctlIsEnabled(config.TimerUnit) {
-		if ok, out := config.SystemctlDisableNow(config.TimerUnit); !ok {
+	if config.ScheduleEnabled() || config.ScheduleInstalled() {
+		if ok, out := config.DisableSchedule(); !ok {
 			m.status = "Disable failed: " + out
 			m.statusIsErr = true
 			return m, nil
@@ -861,7 +890,9 @@ func (m Model) toggleScheduleInstall() (tea.Model, tea.Cmd) {
 			m.statusIsErr = true
 			return m, nil
 		}
-		_, _ = config.SystemctlDaemonReload()
+		if config.HasSystemctl() {
+			_, _ = config.SystemctlDaemonReload()
+		}
 		m.status = "Rebalancer schedule removed."
 		m.statusIsErr = false
 		return m, m.loadRebalancerStatus()
@@ -877,15 +908,15 @@ func (m Model) toggleScheduleInstall() (tea.Model, tea.Cmd) {
 		m.statusIsErr = true
 		return m, nil
 	}
-	if _, out := config.SystemctlDaemonReload(); out != "" {
-		// daemon-reload prints diagnostics; surface only on hard failures.
+	if config.HasSystemctl() {
+		_, _ = config.SystemctlDaemonReload()
+		if ok, out := config.EnableSchedule(); !ok {
+			m.status = "Schedule activation failed: " + out
+			m.statusIsErr = true
+			return m, nil
+		}
 	}
-	if ok, out := config.SystemctlEnableNow(config.TimerUnit); !ok {
-		m.status = "Schedule activation failed: " + out
-		m.statusIsErr = true
-		return m, nil
-	}
-	m.status = "Rebalancer timer enabled — scheduled Mon-Fri at 12:00 ET."
+	m.status = "Rebalancer schedule enabled — weekday 12:00 America/New_York."
 	m.statusIsErr = false
 	return m, m.loadRebalancerStatus()
 }
@@ -893,18 +924,18 @@ func (m Model) toggleScheduleInstall() (tea.Model, tea.Cmd) {
 // toggleTimerActive: pauses the timer if running, resumes it if stopped.
 // Refuses if the schedule isn't installed. Mirrors Python action_toggle_rebalancer.
 func (m Model) toggleTimerActive() (tea.Model, tea.Cmd) {
-	if !config.HasSystemctl() {
-		m.status = "Pause/resume requires systemctl on this platform."
+	if !config.HasScheduleSupport() {
+		m.status = "Pause/resume requires systemd or launchd on this platform."
 		m.statusIsErr = true
 		return m, nil
 	}
-	if !config.SystemctlIsEnabled(config.TimerUnit) {
+	if !config.ScheduleInstalled() && !config.ScheduleEnabled() {
 		m.status = "No rebalancer schedule installed — press [e] to install it."
 		m.statusIsErr = true
 		return m, nil
 	}
-	if config.SystemctlIsActive(config.TimerUnit) {
-		if ok, out := config.SystemctlStop(config.TimerUnit); !ok {
+	if config.ScheduleEnabled() {
+		if ok, out := config.StopSchedule(); !ok {
 			m.status = "Pause failed: " + out
 			m.statusIsErr = true
 			return m, nil
@@ -913,14 +944,15 @@ func (m Model) toggleTimerActive() (tea.Model, tea.Cmd) {
 		m.statusIsErr = false
 		return m, m.loadRebalancerStatus()
 	}
-	if _, _ = config.SystemctlDaemonReload(); false {
+	if config.HasSystemctl() {
+		_, _ = config.SystemctlDaemonReload()
 	}
-	if ok, out := config.SystemctlStart(config.TimerUnit); !ok {
+	if ok, out := config.StartSchedule(); !ok {
 		m.status = "Resume failed: " + out
 		m.statusIsErr = true
 		return m, nil
 	}
-	m.status = "Rebalancer schedule resumed — next run follows the 12:00 ET schedule."
+	m.status = "Rebalancer schedule resumed — next run follows weekday 12:00 ET."
 	m.statusIsErr = false
 	return m, m.loadRebalancerStatus()
 }

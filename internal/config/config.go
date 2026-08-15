@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,15 +46,17 @@ func cacheDir(accountID string) string {
 
 func norm(id string) string { return strings.ToUpper(strings.TrimSpace(id)) }
 
-func AccountsFile() string          { return filepath.Join(AppDir(), "accounts.json") }
-func RebalanceConfigPath(id string) string { return filepath.Join(accountDir(id), "rebalance_config.json") }
-func PortfolioCachePath(id string) string  { return filepath.Join(cacheDir(id), "portfolio_cache.json") }
+func AccountsFile() string { return filepath.Join(AppDir(), "accounts.json") }
+func RebalanceConfigPath(id string) string {
+	return filepath.Join(accountDir(id), "rebalance_config.json")
+}
+func PortfolioCachePath(id string) string { return filepath.Join(cacheDir(id), "portfolio_cache.json") }
 func IndexCachePath(id, index string) string {
 	return filepath.Join(cacheDir(id), "constituents_"+strings.ToUpper(index)+".json")
 }
-func RebalanceLogPath(id string) string  { return filepath.Join(cacheDir(id), "rebalance.log") }
-func TodayBuysPath(id string) string     { return filepath.Join(cacheDir(id), "today_buys.json") }
-func SkipFilePath(id string) string      { return filepath.Join(cacheDir(id), "skip_next_rebalance") }
+func RebalanceLogPath(id string) string   { return filepath.Join(cacheDir(id), "rebalance.log") }
+func TodayBuysPath(id string) string      { return filepath.Join(cacheDir(id), "today_buys.json") }
+func SkipFilePath(id string) string       { return filepath.Join(cacheDir(id), "skip_next_rebalance") }
 func MarketCapCachePath(id string) string { return filepath.Join(cacheDir(id), "market_caps.json") }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,45 +270,85 @@ func launchdPlistPath() string {
 }
 
 func installLaunchdPlist(binaryPath string) error {
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.public-terminal.rebalance</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>%s</string>
-        <string>--rebalance</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
-    </array>
-    <key>StandardOutPath</key>
-    <string>%s</string>
-    <key>StandardErrorPath</key>
-    <string>%s</string>
-    <key>RunAtLoad</key>
-    <false/>
-</dict>
-</plist>
-`, binaryPath, filepath.Join(AppDir(), "rebalance.log"), filepath.Join(AppDir(), "rebalance.log"))
-
 	dir := filepath.Join(homeDir(), "Library", "LaunchAgents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(launchdPlistPath(), []byte(plist), 0o644)
+	hour := LaunchdHourForNoonET(time.Now())
+	if err := os.WriteFile(launchdPlistPath(), []byte(launchdPlistBody(binaryPath, hour)), 0o644); err != nil {
+		return err
+	}
+	return bootstrapLaunchd()
 }
 
 func removeLaunchdPlist() error {
+	bootoutLaunchd()
 	_ = os.Remove(launchdPlistPath())
 	return nil
+}
+
+// HasScheduleSupport reports whether this host can install a daily rebalance schedule.
+func HasScheduleSupport() bool {
+	if runtime.GOOS == "darwin" {
+		return true
+	}
+	return HasSystemctl()
+}
+
+// ScheduleInstalled reports whether unit/plist files exist.
+func ScheduleInstalled() bool {
+	if runtime.GOOS == "darwin" {
+		return LaunchdInstalled()
+	}
+	return TimerInstalled()
+}
+
+// ScheduleEnabled reports whether the schedule is loaded/enabled.
+func ScheduleEnabled() bool {
+	if runtime.GOOS == "darwin" {
+		return LaunchdLoaded()
+	}
+	return SystemctlIsEnabled(TimerUnit)
+}
+
+// EnableSchedule loads/enables the installed daily rebalance schedule.
+func EnableSchedule() (bool, string) {
+	if runtime.GOOS == "darwin" {
+		if err := LaunchdEnable(); err != nil {
+			return false, err.Error()
+		}
+		return true, ""
+	}
+	return SystemctlEnableNow(TimerUnit)
+}
+
+// DisableSchedule unloads/disables the daily rebalance schedule.
+func DisableSchedule() (bool, string) {
+	if runtime.GOOS == "darwin" {
+		LaunchdDisable()
+		return true, ""
+	}
+	return SystemctlDisableNow(TimerUnit)
+}
+
+// StartSchedule resumes an installed schedule without rewriting unit/plist files.
+func StartSchedule() (bool, string) {
+	if runtime.GOOS == "darwin" {
+		if err := LaunchdEnable(); err != nil {
+			return false, err.Error()
+		}
+		return true, ""
+	}
+	return SystemctlStart(TimerUnit)
+}
+
+// StopSchedule pauses an installed schedule without removing unit/plist files.
+func StopSchedule() (bool, string) {
+	if runtime.GOOS == "darwin" {
+		LaunchdDisable()
+		return true, ""
+	}
+	return SystemctlStop(TimerUnit)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

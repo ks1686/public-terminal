@@ -15,6 +15,8 @@ import (
 type OptionsModel struct {
 	tbl  table.Model
 	rows []table.Row
+	occ  []string
+	qty  []string
 }
 
 func NewOptionsModel() OptionsModel {
@@ -67,7 +69,11 @@ func (m *OptionsModel) FromPortfolio(p *api.Portfolio) {
 	sort.Slice(opts, func(i, j int) bool { return opts[i].OCCSymbol < opts[j].OCCSymbol })
 
 	tRows := make([]table.Row, len(opts))
+	occ := make([]string, len(opts))
+	qty := make([]string, len(opts))
 	for i, o := range opts {
+		occ[i] = o.OCCSymbol
+		qty[i] = o.Quantity.StringFixed(0)
 		dayPct := ""
 		if o.DailyGainPct != nil {
 			f, _ := o.DailyGainPct.Float64()
@@ -93,7 +99,19 @@ func (m *OptionsModel) FromPortfolio(p *api.Portfolio) {
 		}
 	}
 	m.rows = tRows
+	m.occ = occ
+	m.qty = qty
 	m.tbl.SetRows(tRows)
+}
+
+// SelectedContract returns the OCC symbol and contract quantity for the
+// highlighted options row. Empty strings if nothing is selected.
+func (m OptionsModel) SelectedContract() (occ, qty string) {
+	i := m.tbl.Cursor()
+	if i < 0 || i >= len(m.occ) {
+		return "", ""
+	}
+	return m.occ[i], m.qty[i]
 }
 
 func (m OptionsModel) Update(msg tea.Msg) (OptionsModel, tea.Cmd) {

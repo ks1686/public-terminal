@@ -41,11 +41,15 @@ func NewOrderModal(client *api.Client, side, defaultSymbol, defaultType string) 
 	sym.Focus()
 
 	instr := textinput.New()
-	instr.Placeholder = "EQUITY or CRYPTO"
+	instr.Placeholder = "EQUITY, CRYPTO, or OPTION"
 	instr.SetValue(strings.ToUpper(defaultType))
 
 	qty := textinput.New()
-	qty.Placeholder = "Dollar amount (e.g. 100)"
+	if strings.EqualFold(defaultType, "OPTION") {
+		qty.Placeholder = "Contracts (e.g. 1)"
+	} else {
+		qty.Placeholder = "Dollar amount (e.g. 100)"
+	}
 
 	limit := textinput.New()
 	limit.Placeholder = "Limit price"
@@ -62,6 +66,16 @@ func NewOrderModal(client *api.Client, side, defaultSymbol, defaultType string) 
 		limitInput: limit,
 		stopInput:  stop,
 	}
+}
+
+// WithQuantity pre-fills the amount/quantity field (used for option closes).
+func (m OrderModal) WithQuantity(qty string) OrderModal {
+	m.qtyInput.SetValue(qty)
+	return m
+}
+
+func (m OrderModal) isOption() bool {
+	return strings.EqualFold(strings.TrimSpace(m.typeInput.Value()), "OPTION")
 }
 
 func (m OrderModal) Init() tea.Cmd { return textinput.Blink }
@@ -125,12 +139,27 @@ func (m *OrderModal) refocus() {
 }
 
 func (m *OrderModal) trySubmit() (tea.Model, tea.Cmd) {
-	sym := strings.ToUpper(strings.TrimSpace(m.symInput.Value()))
-	if sym == "" {
-		m.err = "Symbol is required."
-		m.focus = 0
+	req, errMsgText := m.buildRequest()
+	if errMsgText != "" {
+		m.err = errMsgText
 		m.refocus()
 		return m, nil
+	}
+	m.err = ""
+	sym := req.Instrument.Symbol
+	return m, func() tea.Msg {
+		if err := m.client.PlaceOrder(req); err != nil {
+			return errMsg{err}
+		}
+		return OrderPlacedMsg{Symbol: sym}
+	}
+}
+
+func (m *OrderModal) buildRequest() (api.OrderRequest, string) {
+	sym := strings.ToUpper(strings.TrimSpace(m.symInput.Value()))
+	if sym == "" {
+		m.focus = 0
+		return api.OrderRequest{}, "Symbol is required."
 	}
 	instrType := strings.ToUpper(strings.TrimSpace(m.typeInput.Value()))
 	if instrType == "" {
@@ -138,17 +167,19 @@ func (m *OrderModal) trySubmit() (tea.Model, tea.Cmd) {
 	}
 	amtStr := strings.TrimSpace(m.qtyInput.Value())
 	if amtStr == "" {
-		m.err = "Amount is required."
 		m.focus = 2
-		m.refocus()
-		return m, nil
+		if instrType == "OPTION" {
+			return api.OrderRequest{}, "Contract quantity is required."
+		}
+		return api.OrderRequest{}, "Amount is required."
 	}
 	amt, err := decimal.NewFromString(amtStr)
 	if err != nil || !amt.IsPositive() {
-		m.err = "Amount must be a positive number."
 		m.focus = 2
-		m.refocus()
-		return m, nil
+		if instrType == "OPTION" {
+			return api.OrderRequest{}, "Quantity must be a positive number of contracts."
+		}
+		return api.OrderRequest{}, "Amount must be a positive number."
 	}
 
 	ot := orderTypes[m.orderType]
@@ -157,51 +188,40 @@ func (m *OrderModal) trySubmit() (tea.Model, tea.Cmd) {
 		OrderSide:  m.side,
 		OrderType:  ot,
 		Expiration: api.OrderExpiration{TimeInForce: "DAY"},
-		Amount:     &amt,
+	}
+	if instrType == "OPTION" {
+		req.Quantity = &amt
+	} else {
+		req.Amount = &amt
 	}
 
 	if ot == "LIMIT" || ot == "STOP_LIMIT" {
 		lpStr := strings.TrimSpace(m.limitInput.Value())
 		if lpStr == "" {
-			m.err = "Limit price is required for this order type."
 			m.focus = 3
-			m.refocus()
-			return m, nil
+			return api.OrderRequest{}, "Limit price is required for this order type."
 		}
 		lp, err := decimal.NewFromString(lpStr)
 		if err != nil || !lp.IsPositive() {
-			m.err = "Limit price must be a positive number."
 			m.focus = 3
-			m.refocus()
-			return m, nil
+			return api.OrderRequest{}, "Limit price must be a positive number."
 		}
 		req.LimitPrice = &lp
 	}
 	if ot == "STOP" || ot == "STOP_LIMIT" {
 		spStr := strings.TrimSpace(m.stopInput.Value())
 		if spStr == "" {
-			m.err = "Stop price is required for this order type."
 			m.focus = 4
-			m.refocus()
-			return m, nil
+			return api.OrderRequest{}, "Stop price is required for this order type."
 		}
 		sp, err := decimal.NewFromString(spStr)
 		if err != nil || !sp.IsPositive() {
-			m.err = "Stop price must be a positive number."
 			m.focus = 4
-			m.refocus()
-			return m, nil
+			return api.OrderRequest{}, "Stop price must be a positive number."
 		}
 		req.StopPrice = &sp
 	}
-
-	m.err = ""
-	return m, func() tea.Msg {
-		if err := m.client.PlaceOrder(req); err != nil {
-			return errMsg{err}
-		}
-		return OrderPlacedMsg{Symbol: sym}
-	}
+	return req, ""
 }
 
 type errMsg struct{ err error }
@@ -223,12 +243,16 @@ func (m OrderModal) View() string {
 		}
 	}
 
+	qtyLabel := "Amount $: "
+	if m.isOption() {
+		qtyLabel = "Contracts: "
+	}
 	lines := []string{
 		title,
 		"",
 		"Symbol:   " + m.symInput.View(),
 		"Type:     " + m.typeInput.View(),
-		"Amount $: " + m.qtyInput.View(),
+		qtyLabel + m.qtyInput.View(),
 		"Order:    " + strings.Join(typeTabs, " ") + "  ([ / ] to change)",
 	}
 	if m.orderType >= 1 {

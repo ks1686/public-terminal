@@ -10,13 +10,13 @@ A btop/htop-style trading TUI for [Public.com](https://public.com), with direct 
 - **Live portfolio** — holdings, values, quantities, open orders, **options positions**
 - **Four-pane layout** — Stocks, Crypto, Options, and Open Orders in a 2×2 grid
 - **Manual orders** — market, limit, stop, and stop-limit orders for stocks, ETFs, and crypto
-- **Options tracking** — view open options positions with contract details, expiration dates, and P&L
+- **Options tracking** — view open options positions with contract details, expiration dates, and P&L; close existing contracts from the Options pane (`s`)
 - **Live portfolio stream** — balance, holdings, options, and open orders refresh every 30 seconds
 - **Direct index investing** — top N stocks from S&P 500, NASDAQ-100, DJIA, FTSE Global All Cap, or SPUS (Shariah), market-cap weighted, rebalanced daily
 - **Margin support** — optionally deploy a configurable percentage of your margin capacity as additional buying power
 - **Configurable exclusions** — skip specific tickers from rebalancing entirely
 - **PDT protection** — day-trade ledger prevents selling positions opened the same day
-- **Systemd timer** — fires Mon–Fri at 12:00 ET; fully manageable from inside the TUI
+- **Scheduled rebalance** — systemd timer on Linux or launchd agent on macOS; weekday 12:00 America/New_York; fully manageable from inside the TUI
 
 ---
 
@@ -99,6 +99,10 @@ On first run you will be prompted to enter your account ID(s). All config is sto
 
 ## Interface
 
+![Public Terminal TUI](docs/screenshot-tui.svg)
+
+Demo layout with redacted account IDs. The live TUI uses the same 2×2 grid and account tabs.
+
 ### Layout
 
 ```text
@@ -138,10 +142,12 @@ Key hints / Status bar
 ### Placing orders (`b` / `s`)
 
 A modal prompts for:
-- **Symbol** — e.g. `AAPL`, `BTC`, `GLDM`
-- **Instrument type** — Equity or Crypto
+- **Symbol** — e.g. `AAPL`, `BTC`, `GLDM`, or an OCC option symbol
+- **Instrument type** — Equity, Crypto, or Option
 - **Order type** — Market, Limit, Stop, or Stop Limit
-- **Quantity** — shares or coin units (fractional supported)
+- **Amount / quantity** — dollar amount for stocks and crypto; contract count for options
+
+From the Options pane, `s` pre-fills the selected OCC symbol and contract quantity to close that position. Opening new options (`b` on that pane) is not supported yet. Public.com will reject the order if the account cannot trade options; the TUI surfaces that error in the status bar.
 
 Limit and stop prices are shown conditionally based on the selected order type.
 
@@ -210,19 +216,40 @@ A daily buy ledger records every equity symbol purchased in any run today. Subse
 
 ---
 
-## Systemd Timer (Automated Daily Rebalance)
+## Automated Daily Rebalance
 
-### Install / Remove
+Use `e` in the TUI to install or remove the schedule, and `t` to pause or resume it. The intended fire time is **Monday–Friday at 12:00 America/New_York**.
 
-Use `e` in the TUI to install or remove the automated rebalancer schedule. The timer fires Mon–Fri at 12:00 ET.
+### Linux (systemd)
 
-### Shell management
+Units live under `~/.config/systemd/user/`:
+
+- `public-terminal-rebalance.service`
+- `public-terminal-rebalance.timer`
+
+The timer uses `TimeZone=America/New_York`.
 
 ```bash
 systemctl --user status public-terminal-rebalance.timer
 journalctl --user -u public-terminal-rebalance.service -f
 systemctl --user stop public-terminal-rebalance.timer
 systemctl --user disable --now public-terminal-rebalance.timer
+```
+
+### macOS (launchd)
+
+The TUI writes and bootstraps:
+
+`~/Library/LaunchAgents/com.public-terminal.rebalance.plist`
+
+`launchd` `StartCalendarInterval` is **local wall-clock time**, not `America/New_York`. On install, public-terminal converts 12:00 ET to the matching local hour (DST-aware for the next weekday noon ET). After a timezone or DST change, press `e` twice (remove, then install) to rewrite the hour.
+
+Removing the schedule boots the agent out before deleting the plist. Logs go to `~/.config/public-terminal/rebalance.log`.
+
+```bash
+launchctl print gui/$(id -u)/com.public-terminal.rebalance
+launchctl bootout gui/$(id -u)/com.public-terminal.rebalance
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.public-terminal.rebalance.plist
 ```
 
 ---

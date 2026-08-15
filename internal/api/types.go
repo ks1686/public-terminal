@@ -101,15 +101,16 @@ var ActiveOrderStatuses = map[string]bool{
 // ─────────────────────────────────────────────────────────────────────────────
 
 type OrderRequest struct {
-	OrderID    string           `json:"orderId"`
-	Instrument OrderInstrument  `json:"instrument"`
-	OrderSide  string           `json:"orderSide"`
-	OrderType  string           `json:"orderType"`
-	Expiration OrderExpiration  `json:"expiration"`
-	Quantity   *decimal.Decimal `json:"quantity,omitempty"`
-	Amount     *decimal.Decimal `json:"amount,omitempty"`
-	LimitPrice *decimal.Decimal `json:"limitPrice,omitempty"`
-	StopPrice  *decimal.Decimal `json:"stopPrice,omitempty"`
+	OrderID            string           `json:"orderId"`
+	Instrument         OrderInstrument  `json:"instrument"`
+	OrderSide          string           `json:"orderSide"`
+	OrderType          string           `json:"orderType"`
+	Expiration         OrderExpiration  `json:"expiration"`
+	Quantity           *decimal.Decimal `json:"quantity,omitempty"`
+	Amount             *decimal.Decimal `json:"amount,omitempty"`
+	LimitPrice         *decimal.Decimal `json:"limitPrice,omitempty"`
+	StopPrice          *decimal.Decimal `json:"stopPrice,omitempty"`
+	OpenCloseIndicator string           `json:"openCloseIndicator,omitempty"`
 }
 
 type OrderInstrument struct {

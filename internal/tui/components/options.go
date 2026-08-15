@@ -73,7 +73,7 @@ func (m *OptionsModel) FromPortfolio(p *api.Portfolio) {
 	qty := make([]string, len(opts))
 	for i, o := range opts {
 		occ[i] = o.OCCSymbol
-		qty[i] = o.Quantity.StringFixed(0)
+		qty[i] = o.Quantity.String()
 		dayPct := ""
 		if o.DailyGainPct != nil {
 			f, _ := o.DailyGainPct.Float64()

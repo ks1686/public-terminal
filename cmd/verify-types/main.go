@@ -1,4 +1,6 @@
-// Throwaway: verifies api types parse against captured CLI JSON. Delete after use.
+//go:build ignore
+
+// Throwaway: verifies api types parse against captured CLI JSON.
 package main
 
 import (

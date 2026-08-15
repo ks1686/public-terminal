@@ -83,18 +83,18 @@ func (o OptionPosition) ToDict() map[string]any {
 	}
 	valueNum, _ := o.CurrentValue.Float64()
 	return map[string]any{
-		"symbol_display":  o.SymbolDisplay(),
-		"underlying":      o.UnderlyingSymbol,
-		"type":            o.OptionType,
-		"strike":          o.StrikePrice.StringFixed(2),
-		"expiry":          o.ExpirationDate,
-		"qty":             o.Quantity.String(),
-		"price":           lastPriceStr,
-		"value":           valueStr,
-		"value_num":       valueNum,
-		"gain":            gainStr,
-		"gain_positive":   gainPositive,
-		"days_to_expiry":  o.DaysToExpiry,
+		"symbol_display": o.SymbolDisplay(),
+		"underlying":     o.UnderlyingSymbol,
+		"type":           o.OptionType,
+		"strike":         o.StrikePrice.StringFixed(2),
+		"expiry":         o.ExpirationDate,
+		"qty":            o.Quantity.String(),
+		"price":          lastPriceStr,
+		"value":          valueStr,
+		"value_num":      valueNum,
+		"gain":           gainStr,
+		"gain_positive":  gainPositive,
+		"days_to_expiry": o.DaysToExpiry,
 	}
 }
 

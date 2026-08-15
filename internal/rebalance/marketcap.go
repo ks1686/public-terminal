@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	MarketCapCacheMaxAgeHours  = 20
-	MarketCapMinCoveragePct    = 0.95
-	MarketCapFetchWorkers      = 20
-	MarketCapFetchTimeoutSecs  = 300
-	YahooQuoteBatchSize        = 50 // Yahoo Finance v7 quote endpoint batch size
+	MarketCapCacheMaxAgeHours = 20
+	MarketCapMinCoveragePct   = 0.95
+	MarketCapFetchWorkers     = 20
+	MarketCapFetchTimeoutSecs = 300
+	YahooQuoteBatchSize       = 50 // Yahoo Finance v7 quote endpoint batch size
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,10 +27,10 @@ const (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type marketCapCache struct {
-	UpdatedAt        string             `json:"updated_at"`
-	Index            string             `json:"index"`
-	SourceTickerCount int               `json:"source_ticker_count"`
-	Caps             map[string]float64 `json:"caps"`
+	UpdatedAt         string             `json:"updated_at"`
+	Index             string             `json:"index"`
+	SourceTickerCount int                `json:"source_ticker_count"`
+	Caps              map[string]float64 `json:"caps"`
 }
 
 var brokerToYF = map[string]string{
@@ -101,7 +101,7 @@ func saveMarketCapCache(cachePath, index string, caps map[string]float64, source
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
+	if err := os.WriteFile(cachePath, b, 0o600); err != nil {
 		log.Printf("WARNING  Could not save market cap cache: %v", err)
 		return
 	}
@@ -223,7 +223,7 @@ func fetchYahooBatchMarketCaps(ctx context.Context, yfSymbols []string) (map[str
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes+1))
 	if err != nil {
 		return nil, err
 	}

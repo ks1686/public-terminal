@@ -23,10 +23,13 @@ type PortfolioSnapshot struct {
 	CashBalance        decimal.Decimal
 	BuyingPower        decimal.Decimal
 	CashOnlyBP         decimal.Decimal
+	OptionsValue       decimal.Decimal
 	EquityPos          map[string]decimal.Decimal // symbol → current value
 	CryptoPos          map[string]decimal.Decimal
 	EquityQty          map[string]decimal.Decimal // symbol → share count
 	CryptoQty          map[string]decimal.Decimal
+	UnknownEquityValue map[string]bool
+	UnknownCryptoValue map[string]bool
 	Orders             []api.Order
 }
 
@@ -35,11 +38,19 @@ func GetPortfolioSnapshot(client *api.Client) (*PortfolioSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	var totalEquity, cashBalance decimal.Decimal
+	return snapshotFromPortfolio(p), nil
+}
+
+func snapshotFromPortfolio(p *api.Portfolio) *PortfolioSnapshot {
+	var totalEquity, cashBalance, optionsValue decimal.Decimal
 	for _, e := range p.Equity {
-		if e.Type == "CASH" {
+		switch e.Type {
+		case "CASH":
 			cashBalance = cashBalance.Add(e.Value)
-		} else {
+		case "OPTION":
+			optionsValue = optionsValue.Add(e.Value)
+			totalEquity = totalEquity.Add(e.Value)
+		default:
 			totalEquity = totalEquity.Add(e.Value)
 		}
 	}
@@ -54,32 +65,39 @@ func GetPortfolioSnapshot(client *api.Client) (*PortfolioSnapshot, error) {
 	}
 
 	snap := &PortfolioSnapshot{
-		TotalEquity: totalEquity,
-		CashBalance: cashBalance,
-		BuyingPower: bp,
-		CashOnlyBP:  cashBP,
-		EquityPos:   map[string]decimal.Decimal{},
-		CryptoPos:   map[string]decimal.Decimal{},
-		EquityQty:   map[string]decimal.Decimal{},
-		CryptoQty:   map[string]decimal.Decimal{},
-		Orders:      p.Orders,
+		TotalEquity:        totalEquity,
+		CashBalance:        cashBalance,
+		BuyingPower:        bp,
+		CashOnlyBP:         cashBP,
+		OptionsValue:       optionsValue,
+		EquityPos:          map[string]decimal.Decimal{},
+		CryptoPos:          map[string]decimal.Decimal{},
+		EquityQty:          map[string]decimal.Decimal{},
+		CryptoQty:          map[string]decimal.Decimal{},
+		UnknownEquityValue: map[string]bool{},
+		UnknownCryptoValue: map[string]bool{},
+		Orders:             p.Orders,
 	}
 	for _, pos := range p.Positions {
 		sym := pos.Instrument.Symbol
 		switch pos.Instrument.Type {
 		case "EQUITY":
+			snap.EquityQty[sym] = snap.EquityQty[sym].Add(pos.Quantity)
 			if pos.CurrentValue != nil {
-				snap.EquityPos[sym] = *pos.CurrentValue
+				snap.EquityPos[sym] = snap.EquityPos[sym].Add(*pos.CurrentValue)
+			} else {
+				snap.UnknownEquityValue[sym] = true
 			}
-			snap.EquityQty[sym] = pos.Quantity
 		case "CRYPTO":
+			snap.CryptoQty[sym] = snap.CryptoQty[sym].Add(pos.Quantity)
 			if pos.CurrentValue != nil {
-				snap.CryptoPos[sym] = *pos.CurrentValue
+				snap.CryptoPos[sym] = snap.CryptoPos[sym].Add(*pos.CurrentValue)
+			} else {
+				snap.UnknownCryptoValue[sym] = true
 			}
-			snap.CryptoQty[sym] = pos.Quantity
 		}
 	}
-	return snap, nil
+	return snap
 }
 
 // MarginState matches Python's estimate_margin_state output.
@@ -91,16 +109,30 @@ type MarginState struct {
 	EffectiveBP       decimal.Decimal
 }
 
+func clampUnit(pct decimal.Decimal) decimal.Decimal {
+	if pct.IsNegative() {
+		return decimal.Zero
+	}
+	if pct.GreaterThan(decimal.NewFromInt(1)) {
+		return decimal.NewFromInt(1)
+	}
+	return pct
+}
+
 func EstimateMarginState(snap *PortfolioSnapshot, marginUsagePct decimal.Decimal) MarginState {
-	portfolioNAV := decimal.Max(decimal.Zero, snap.TotalEquity.Add(snap.CashBalance))
-	marginCapacity := decimal.Max(decimal.Zero, snap.BuyingPower.Sub(snap.CashOnlyBP))
+	marginUsagePct = clampUnit(marginUsagePct)
+	// Options inflate NAV but are not a rebalance bucket — exclude them from the base.
+	investableEquity := decimal.Max(decimal.Zero, snap.TotalEquity.Sub(snap.OptionsValue))
+	portfolioNAV := decimal.Max(decimal.Zero, investableEquity.Add(snap.CashBalance))
+	headroom := decimal.Max(decimal.Zero, snap.BuyingPower.Sub(snap.CashOnlyBP))
+	currentMarginLoan := decimal.Zero
+	if snap.CashBalance.IsNegative() {
+		currentMarginLoan = snap.CashBalance.Neg()
+	}
+	marginCapacity := currentMarginLoan.Add(headroom)
 	allowedMarginLoan := marginUsagePct.Mul(marginCapacity)
 	investmentBase := portfolioNAV.Add(allowedMarginLoan)
-	effectiveBP := decimal.Max(decimal.Zero, snap.CashOnlyBP.Add(allowedMarginLoan))
-	currentMarginLoan := decimal.Zero
-	if marginCapacity.IsPositive() {
-		currentMarginLoan = decimal.Max(decimal.Zero, snap.CashBalance.Neg())
-	}
+	effectiveBP := decimal.Max(decimal.Zero, snap.CashOnlyBP.Add(decimal.Max(decimal.Zero, allowedMarginLoan.Sub(currentMarginLoan))))
 	return MarginState{
 		PortfolioNAV:      portfolioNAV,
 		MarginLoanEst:     currentMarginLoan,
@@ -110,12 +142,32 @@ func EstimateMarginState(snap *PortfolioSnapshot, marginUsagePct decimal.Decimal
 	}
 }
 
+func validateAllocations(alloc map[string]float64) error {
+	if alloc == nil {
+		return fmt.Errorf("allocations missing")
+	}
+	sum := 0.0
+	for _, v := range alloc {
+		sum += v
+	}
+	if sum < 0.99 || sum > 1.01 {
+		return fmt.Errorf("allocations sum to %.4f — must equal 1.0", sum)
+	}
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main rebalance orchestration
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Run executes the full rebalance for the given account.
 func Run(accountID string, dryRun bool) error {
+	release, err := acquireAccountLock(accountID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	cfg := config.LoadRebalanceConfig(accountID)
 	if !cfg.RebalanceEnabled && !dryRun {
 		log.Printf("INFO     Rebalancing is disabled for account %s — skipping.", accountID)
@@ -157,6 +209,9 @@ func Run(accountID string, dryRun bool) error {
 	alloc := cfg.Allocations
 	if alloc == nil {
 		alloc = config.DefaultAllocations
+	}
+	if err := validateAllocations(alloc); err != nil {
+		return fmt.Errorf("REBALANCE ABORTED — %w", err)
 	}
 	allocStocks := decimal.NewFromFloat(alloc["stocks"])
 	allocBTC := decimal.NewFromFloat(alloc["btc"])
@@ -281,7 +336,9 @@ func Run(accountID string, dryRun bool) error {
 	}
 
 	// Cancel open orders
-	CancelOpenOrders(client, initial.Orders, dryRun)
+	if err := CancelOpenOrders(client, initial.Orders, dryRun); err != nil {
+		return fmt.Errorf("cancelling open orders: %w", err)
+	}
 
 	// Re-fetch after cancellations
 	snap, err := GetPortfolioSnapshot(client)
@@ -333,8 +390,17 @@ func Run(accountID string, dryRun bool) error {
 			allStockSymbols[s] = true
 		}
 	}
+	for s := range snap.UnknownEquityValue {
+		if !nonStockETFs[s] {
+			allStockSymbols[s] = true
+		}
+	}
 	for symbol := range allStockSymbols {
 		if nonStockETFs[symbol] {
+			continue
+		}
+		if snap.UnknownEquityValue[symbol] {
+			log.Printf("WARNING    Skipping %s — missing current value; will not treat as $0.", symbol)
 			continue
 		}
 		weight := stockWeights[symbol]
@@ -352,10 +418,14 @@ func Run(accountID string, dryRun bool) error {
 		BTCSymbol: allocBTC, ETHSymbol: allocETH, SOLSymbol: allocSOL,
 	}
 	for symbol, targetAlloc := range cryptoAllocs {
-		if excludedSet[symbol] {
+		if snap.UnknownCryptoValue[symbol] {
+			log.Printf("WARNING    Skipping %s — missing current value; will not treat as $0.", symbol)
 			continue
 		}
 		currentVal := snap.CryptoPos[symbol]
+		if excludedSet[symbol] {
+			targetAlloc = decimal.Zero
+		}
 		if !targetAlloc.IsPositive() && !currentVal.IsPositive() {
 			continue
 		}
@@ -368,10 +438,13 @@ func Run(accountID string, dryRun bool) error {
 
 	// Crypto deltas
 	for symbol, targetAlloc := range cryptoAllocs {
-		if excludedSet[symbol] {
+		if snap.UnknownCryptoValue[symbol] {
 			continue
 		}
 		currentVal := snap.CryptoPos[symbol]
+		if excludedSet[symbol] {
+			targetAlloc = decimal.Zero
+		}
 		if !targetAlloc.IsPositive() && !currentVal.IsPositive() {
 			continue
 		}
@@ -394,10 +467,14 @@ func Run(accountID string, dryRun bool) error {
 	if !excludedSet[GoldSymbol] {
 		goldTarget = allocGold.Mul(margin.InvestmentBase).RoundBank(2)
 	}
-	goldCurrent := snap.EquityPos[GoldSymbol]
-	log.Printf("INFO       GLDM  target=$%.2f  current=$%.2f  delta=$%.2f",
-		must2(goldTarget.Float64()), must2(goldCurrent.Float64()), must2(goldTarget.Sub(goldCurrent).Float64()))
-	queue(ComputeDelta(GoldSymbol, "EQUITY", goldTarget, goldCurrent, decimal.NewFromFloat(1.00)))
+	if snap.UnknownEquityValue[GoldSymbol] {
+		log.Printf("WARNING    Skipping GLDM — missing current value; will not treat as $0.")
+	} else {
+		goldCurrent := snap.EquityPos[GoldSymbol]
+		log.Printf("INFO       GLDM  target=$%.2f  current=$%.2f  delta=$%.2f",
+			must2(goldTarget.Float64()), must2(goldCurrent.Float64()), must2(goldTarget.Sub(goldCurrent).Float64()))
+		queue(ComputeDelta(GoldSymbol, "EQUITY", goldTarget, goldCurrent, decimal.NewFromFloat(1.00)))
+	}
 
 	log.Printf("INFO     Rebalance plan: %d sells  |  %d buys", len(sells), len(buys))
 	if len(sells) == 0 && len(buys) == 0 {
@@ -445,7 +522,12 @@ func Run(accountID string, dryRun bool) error {
 	if dryRun {
 		sells = FilterByTradability(client, sells)
 		buys = FilterByTradability(client, buys)
-		buys = FillBuyOrders(buys, margin.EffectiveBP)
+		sellNotional := decimal.Zero
+		for _, s := range sells {
+			sellNotional = sellNotional.Add(s.DollarAmount)
+		}
+		dryBP := margin.EffectiveBP.Add(sellNotional)
+		buys = FillBuyOrders(buys, dryBP)
 		log.Printf("INFO     --- DRY RUN ORDER PLAN ---")
 		LogDryRunOrders(sells)
 		LogDryRunOrders(buys)
@@ -461,17 +543,12 @@ func Run(accountID string, dryRun bool) error {
 	if len(sells) > 0 {
 		log.Printf("INFO     --- Placing SELL orders (%d) ---", len(sells))
 		var err error
-		sellIDs, _, err = PlaceBatch(client, sells, cryptoPrices, false)
+		sellIDs, _, err = PlaceBatch(client, sells, cryptoPrices, false, todayBuysPath)
 		if err != nil {
-			if _, ok := err.(PatternDayTradingError); ok {
-				log.Printf("ERROR    REBALANCE ABORTED — PDT restriction.")
-				return nil
-			}
 			return err
 		}
 		if !WaitForOrdersToClear(client, sellIDs, "sell", SellWaitTimeoutSecs) {
-			log.Printf("ERROR    Sell orders did not clear — aborting buy phase.")
-			return nil
+			return fmt.Errorf("sell orders did not clear — aborting buy phase")
 		}
 	}
 
@@ -509,8 +586,13 @@ func Run(accountID string, dryRun bool) error {
 				}
 				if len(supplemental) > 0 {
 					log.Printf("INFO     --- Placing supplemental SELL orders (%d) ---", len(supplemental))
-					suppIDs, _, _ := PlaceBatch(client, supplemental, cryptoPrices, false)
-					WaitForOrdersToClear(client, suppIDs, "supplemental sell", SellWaitTimeoutSecs)
+					suppIDs, _, suppErr := PlaceBatch(client, supplemental, cryptoPrices, false, todayBuysPath)
+					if suppErr != nil {
+						return fmt.Errorf("supplemental sells: %w", suppErr)
+					}
+					if !WaitForOrdersToClear(client, suppIDs, "supplemental sell", SellWaitTimeoutSecs) {
+						return fmt.Errorf("supplemental sells did not clear")
+					}
 					// Refresh BP again
 					if snap2, err2 := GetPortfolioSnapshot(client); err2 == nil {
 						postEffectiveBP = EstimateMarginState(snap2, marginUsagePct).EffectiveBP
@@ -523,21 +605,10 @@ func Run(accountID string, dryRun bool) error {
 	}
 	if len(buys) > 0 {
 		log.Printf("INFO     --- Placing BUY orders (%d) ---", len(buys))
-		_, submittedBuys, err := PlaceBatch(client, buys, cryptoPrices, false)
+		_, _, err := PlaceBatch(client, buys, cryptoPrices, false, todayBuysPath)
 		if err != nil {
-			if _, ok := err.(PatternDayTradingError); ok {
-				log.Printf("ERROR    REBALANCE ABORTED — PDT restriction.")
-				return nil
-			}
 			return err
 		}
-		boughtToday := map[string]bool{}
-		for _, b := range submittedBuys {
-			if b.InstrumentType == "EQUITY" {
-				boughtToday[b.Symbol] = true
-			}
-		}
-		RecordTodayBuys(todayBuysPath, boughtToday)
 	}
 
 	log.Printf("INFO     Rebalance complete.")

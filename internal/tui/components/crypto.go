@@ -14,8 +14,9 @@ import (
 
 // CryptoModel renders the crypto positions table.
 type CryptoModel struct {
-	tbl  table.Model
-	rows []table.Row
+	tbl     table.Model
+	rows    []table.Row
+	symbols []string
 }
 
 func NewCryptoModel() CryptoModel {
@@ -58,6 +59,7 @@ func cryptoColumnsForWidth(w int) []table.Column {
 
 func (m *CryptoModel) FromPortfolio(p *api.Portfolio) {
 	type rowData struct {
+		raw    string
 		symbol string
 		qty    string
 		value  string
@@ -109,6 +111,7 @@ func (m *CryptoModel) FromPortfolio(p *api.Portfolio) {
 			return s
 		}
 		rows = append(rows, rowData{
+			raw:    sym,
 			symbol: paint(sym),
 			qty:    paint(qty),
 			value:  paint(val),
@@ -125,10 +128,13 @@ func (m *CryptoModel) FromPortfolio(p *api.Portfolio) {
 	})
 
 	tRows := make([]table.Row, len(rows))
+	symbols := make([]string, len(rows))
 	for i, r := range rows {
 		tRows[i] = table.Row{r.symbol, r.qty, r.value, r.last, r.dayPct}
+		symbols[i] = r.raw
 	}
 	m.rows = tRows
+	m.symbols = symbols
 	m.tbl.SetRows(tRows)
 }
 
@@ -139,11 +145,11 @@ func (m CryptoModel) Update(msg tea.Msg) (CryptoModel, tea.Cmd) {
 }
 
 func (m CryptoModel) SelectedSymbol() string {
-	r := m.tbl.SelectedRow()
-	if len(r) == 0 {
+	i := m.tbl.Cursor()
+	if i < 0 || i >= len(m.symbols) {
 		return ""
 	}
-	return r[0]
+	return m.symbols[i]
 }
 
 func (m *CryptoModel) SetWidth(w int) {

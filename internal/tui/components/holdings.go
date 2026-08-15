@@ -15,8 +15,9 @@ import (
 
 // HoldingsModel renders the equities positions table.
 type HoldingsModel struct {
-	tbl  table.Model
-	rows []table.Row
+	tbl     table.Model
+	rows    []table.Row
+	symbols []string
 }
 
 func NewHoldingsModel() HoldingsModel {
@@ -85,6 +86,7 @@ func renderTablePane(tbl *table.Model, h int, title, emptyMsg string, empty bool
 
 func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 	type rowData struct {
+		raw    string
 		symbol string
 		qty    string
 		value  string
@@ -136,6 +138,7 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 			return s
 		}
 		rows = append(rows, rowData{
+			raw:    sym,
 			symbol: paint(sym),
 			qty:    paint(qty),
 			value:  paint(val),
@@ -152,19 +155,22 @@ func (m *HoldingsModel) FromPortfolio(p *api.Portfolio) {
 	})
 
 	tRows := make([]table.Row, len(rows))
+	symbols := make([]string, len(rows))
 	for i, r := range rows {
 		tRows[i] = table.Row{r.symbol, r.qty, r.value, r.last, r.dayPct}
+		symbols[i] = r.raw
 	}
 	m.rows = tRows
+	m.symbols = symbols
 	m.tbl.SetRows(tRows)
 }
 
 func (m HoldingsModel) SelectedSymbol() string {
-	r := m.tbl.SelectedRow()
-	if len(r) == 0 {
+	i := m.tbl.Cursor()
+	if i < 0 || i >= len(m.symbols) {
 		return ""
 	}
-	return r[0]
+	return m.symbols[i]
 }
 
 func (m HoldingsModel) Update(msg tea.Msg) (HoldingsModel, tea.Cmd) {

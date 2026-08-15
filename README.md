@@ -68,11 +68,11 @@ Pre-built binaries for Linux and macOS (amd64/arm64) are attached to each [GitHu
 
 ```bash
 # Linux amd64
-curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-linux-amd64
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-linux-x86_64
 chmod +x public-terminal
 
 # macOS arm64 (Apple Silicon)
-curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-darwin-arm64
+curl -L -o public-terminal https://github.com/ks1686/public-terminal/releases/latest/download/public-terminal-macos-arm64
 chmod +x public-terminal
 ```
 
@@ -96,10 +96,13 @@ On first run you will be prompted to enter your account ID(s). All config is sto
 
 | Flag | Description |
 |------|-------------|
+| `--version` | Print version and exit |
+| `--account` | Account ID (default: first configured account) |
 | `--rebalance` | Run rebalancer once and exit |
 | `--dry-run` | Run rebalancer in dry-run mode (no real orders) |
 | `--validate` | Validate the rebalance plan without executing |
-| `--verbose` | Enable verbose logging |
+| `--install-service` | Install systemd/launchd schedule files |
+| `--remove-service` | Remove systemd/launchd schedule files |
 
 ---
 
@@ -143,6 +146,7 @@ Key hints / Status bar
 | `S` | Open rebalance settings modal |
 | `Ctrl+A` | Open account management modal (add / remove accounts) |
 | `Ctrl+←` / `Ctrl+→` | Switch account tab |
+| `?` | Full keybinding overlay |
 | `q` | Quit |
 
 ### Placing orders (`b` / `s`)
@@ -178,8 +182,9 @@ The TUI polls Public.com every 30 seconds and refreshes balances, holdings, opti
 | Asset | Allocation |
 |-------|-----------|
 | Stocks | 65% |
-| BTC | 15% |
-| ETH | 5% |
+| BTC | 12% |
+| ETH | 4% |
+| SOL | 4% |
 | GLDM | 10% |
 | Cash | 5% |
 
@@ -190,7 +195,7 @@ The TUI polls Public.com every 30 seconds and refreshes balances, holdings, opti
 3. Selects top N by market cap, filters excluded tickers, computes within-slice weights
 4. Fetches the current portfolio from Public.com
 5. Computes dollar deltas for all buckets against the investment base
-6. Drift threshold: `max(0.5% of target, $1)` — positions within tolerance are left alone
+6. Drift threshold: `max(0.5% of target, $5)` for equities and `max(0.5% of target, $1)` for crypto — positions within tolerance are left alone
 7. Places SELL orders first, waits for them to clear, then places BUY orders
 8. BUY orders are capped to the effective buying power budget
 9. Logs everything to `accounts/<id>/cache/rebalance.log`
@@ -285,4 +290,10 @@ Credentials are handled exclusively by the `public` CLI via OS keychain — this
 go build ./cmd/public-terminal
 go test ./...
 go vet ./...
+golangci-lint run ./...
 ```
+
+GitHub Actions run on every branch push, pull request, and manual `workflow_dispatch`:
+
+- **CI** — `go vet`, golangci-lint, `go test -race` on Ubuntu and macOS, plus `govulncheck`
+- **Security** — gitleaks and osv-scanner (also weekly on Mondays)

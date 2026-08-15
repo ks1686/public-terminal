@@ -58,6 +58,7 @@ func RebalanceLogPath(id string) string   { return filepath.Join(cacheDir(id), "
 func TodayBuysPath(id string) string      { return filepath.Join(cacheDir(id), "today_buys.json") }
 func SkipFilePath(id string) string       { return filepath.Join(cacheDir(id), "skip_next_rebalance") }
 func MarketCapCachePath(id string) string { return filepath.Join(cacheDir(id), "market_caps.json") }
+func RebalanceLockPath(id string) string  { return filepath.Join(cacheDir(id), "rebalance.lock") }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Accounts
@@ -175,7 +176,7 @@ func SaveRebalanceConfig(accountID string, cfg RebalanceConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(RebalanceConfigPath(accountID), b, 0o600)
+	return WriteFileAtomic(RebalanceConfigPath(accountID), b, 0o600)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,10 +236,6 @@ ExecStart=%s --rebalance
 WorkingDirectory=%s
 StandardOutput=journal
 StandardError=journal
-Restart=on-failure
-RestartSec=60
-StartLimitBurst=3
-StartLimitIntervalSec=300
 `, binaryPath, filepath.Dir(binaryPath))
 
 	timer := `[Unit]
@@ -360,5 +357,33 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return WriteFileAtomic(path, b, 0o600)
+}
+
+// WriteFileAtomic writes data to path via a same-directory temp file + rename.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

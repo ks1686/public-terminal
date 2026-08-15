@@ -55,6 +55,23 @@ func TestOrderModal_EquitySubmitUsesAmount(t *testing.T) {
 	if req.Quantity != nil {
 		t.Fatal("did not expect Quantity for EQUITY")
 	}
+	if req.OrderID == "" {
+		t.Fatal("expected client-generated orderId")
+	}
+}
+
+func TestOrderModal_OptionCloseIndicator(t *testing.T) {
+	m := NewOrderModal(nil, "SELL", "AAPL  260516C00150000", "OPTION").WithQuantity("2")
+	req, err := m.buildRequest()
+	if err != "" {
+		t.Fatalf("buildRequest error: %s", err)
+	}
+	if req.OpenCloseIndicator != "CLOSE" {
+		t.Fatalf("OpenCloseIndicator = %q, want CLOSE", req.OpenCloseIndicator)
+	}
+	if req.OrderID == "" {
+		t.Fatal("expected client-generated orderId")
+	}
 }
 
 func TestOrderModal_EscapeCancels(t *testing.T) {

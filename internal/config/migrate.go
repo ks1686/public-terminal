@@ -31,7 +31,7 @@ func readSchemaVersion() int {
 
 func writeSchemaVersion(version int) error {
 	b, _ := json.Marshal(map[string]int{"version": version})
-	return os.WriteFile(schemaVersionFile(), b, 0o644)
+	return WriteFileAtomic(schemaVersionFile(), b, 0o600)
 }
 
 // MigrateIfNeeded runs any outstanding schema migrations at startup.
@@ -133,7 +133,7 @@ func migrateV0ToV1() error {
 
 	if _, err := os.Stat(AccountsFile()); os.IsNotExist(err) {
 		b, _ := json.Marshal([]string{accountID})
-		_ = os.WriteFile(AccountsFile(), b, 0o644)
+		_ = WriteFileAtomic(AccountsFile(), b, 0o600)
 	}
 
 	return writeSchemaVersion(1)

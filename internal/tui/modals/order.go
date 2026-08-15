@@ -24,6 +24,7 @@ type OrderModal struct {
 	stopInput  textinput.Model
 	focus      int
 	err        string
+	confirming bool
 }
 
 var orderTypes = []string{"MARKET", "LIMIT", "STOP", "STOP_LIMIT"}
@@ -74,6 +75,8 @@ func (m OrderModal) WithQuantity(qty string) OrderModal {
 	return m
 }
 
+func (m *OrderModal) SetError(s string) { m.err = s }
+
 func (m OrderModal) isOption() bool {
 	return strings.EqualFold(strings.TrimSpace(m.typeInput.Value()), "OPTION")
 }
@@ -104,8 +107,10 @@ func (m OrderModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.orderType = (m.orderType + 1) % len(orderTypes)
 
 		case "ctrl+s", "enter":
-			if m.focus == 0 || m.focus == 1 || m.focus == 2 || m.focus == 3 || m.focus == 4 {
-				// handled by trySubmit
+			if !m.confirming {
+				m.confirming = true
+				m.err = ""
+				return m, nil
 			}
 			return m.trySubmit()
 		}
@@ -142,14 +147,16 @@ func (m *OrderModal) trySubmit() (tea.Model, tea.Cmd) {
 	req, errMsgText := m.buildRequest()
 	if errMsgText != "" {
 		m.err = errMsgText
+		m.confirming = false
 		m.refocus()
 		return m, nil
 	}
 	m.err = ""
+	m.confirming = false
 	sym := req.Instrument.Symbol
 	return m, func() tea.Msg {
 		if err := m.client.PlaceOrder(req); err != nil {
-			return errMsg{err}
+			return ErrMsg{Err: err}
 		}
 		return OrderPlacedMsg{Symbol: sym}
 	}
@@ -182,12 +189,20 @@ func (m *OrderModal) buildRequest() (api.OrderRequest, string) {
 		return api.OrderRequest{}, "Amount must be a positive number."
 	}
 
+	orderID, err := api.NewOrderID()
+	if err != nil {
+		return api.OrderRequest{}, "Could not generate order id."
+	}
 	ot := orderTypes[m.orderType]
 	req := api.OrderRequest{
+		OrderID:    orderID,
 		Instrument: api.OrderInstrument{Symbol: sym, Type: instrType},
 		OrderSide:  m.side,
 		OrderType:  ot,
 		Expiration: api.OrderExpiration{TimeInForce: "DAY"},
+	}
+	if instrType == "OPTION" && m.side == "SELL" {
+		req.OpenCloseIndicator = "CLOSE"
 	}
 	if instrType == "OPTION" {
 		req.Quantity = &amt
@@ -224,7 +239,8 @@ func (m *OrderModal) buildRequest() (api.OrderRequest, string) {
 	return req, ""
 }
 
-type errMsg struct{ err error }
+// ErrMsg is returned when a modal command fails. The root model surfaces it.
+type ErrMsg struct{ Err error }
 
 func (m OrderModal) View() string {
 	title := fmt.Sprintf("%s Order", m.side)
@@ -262,7 +278,11 @@ func (m OrderModal) View() string {
 		lines = append(lines, "Stop $:   "+m.stopInput.View())
 	}
 	lines = append(lines, "")
-	lines = append(lines, theme.Muted.Render("tab: next field  ctrl+s/enter: place  esc: cancel"))
+	hint := "tab: next field  enter: review  esc: cancel"
+	if m.confirming {
+		hint = "enter again to confirm  esc: back"
+	}
+	lines = append(lines, theme.Muted.Render(hint))
 	if m.err != "" {
 		lines = append(lines, theme.StatusErr.Render(m.err))
 	}

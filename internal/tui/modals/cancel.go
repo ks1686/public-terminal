@@ -32,7 +32,7 @@ func (m CancelModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "y", "Y", "enter":
 			return m, func() tea.Msg {
 				if err := m.client.CancelOrder(m.orderID); err != nil {
-					return errMsg{err}
+					return ErrMsg{Err: err}
 				}
 				return OrderCancelledConfirmMsg{OrderID: m.orderID}
 			}

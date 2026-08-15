@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/ks1686/public-terminal/internal/api"
+	"github.com/ks1686/public-terminal/internal/config"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -19,12 +20,12 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 var (
-	MinOrderDollars      = decimal.NewFromFloat(5.00)
+	MinOrderDollars       = decimal.NewFromFloat(5.00)
 	MinCryptoOrderDollars = decimal.NewFromFloat(1.00)
 	RebalanceThresholdPct = decimal.NewFromFloat(0.005)
-	BuyingPowerBuffer    = decimal.NewFromFloat(1.00)
-	SellWaitTimeoutSecs  = 300
-	OrderPollSecs        = 2
+	BuyingPowerBuffer     = decimal.NewFromFloat(1.00)
+	SellWaitTimeoutSecs   = 300
+	OrderPollSecs         = 2
 )
 
 const (
@@ -36,11 +37,6 @@ const (
 
 // nonStockETFs lists equity symbols excluded from the stock index slice.
 var nonStockETFs = map[string]bool{GoldSymbol: true}
-
-// cryptoToYF maps Public broker crypto symbols to Yahoo Finance tickers.
-var cryptoToYF = map[string]string{
-	"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Order spec
@@ -304,7 +300,7 @@ func FilterByTradability(client *api.Client, specs []OrderSpec) []OrderSpec {
 
 // PlaceBatch places orders serially. Returns (submittedOrderIDs, submittedSpecs).
 // Raises PatternDayTradingError on PDT; stops on intraday margin error.
-func PlaceBatch(client *api.Client, specs []OrderSpec, cryptoPrices map[string]decimal.Decimal, dryRun bool) ([]string, []OrderSpec, error) {
+func PlaceBatch(client *api.Client, specs []OrderSpec, cryptoPrices map[string]decimal.Decimal, dryRun bool, todayBuysPath string) ([]string, []OrderSpec, error) {
 	if dryRun {
 		LogDryRunOrders(specs)
 		return nil, nil, nil
@@ -324,7 +320,6 @@ func PlaceBatch(client *api.Client, specs []OrderSpec, cryptoPrices map[string]d
 			if isPDTError(err) {
 				log.Printf("ERROR    ✗ %s %-6s — PATTERN DAY TRADING restriction: %v", s.Side, s.Symbol, err)
 				log.Printf("ERROR    PDT restriction detected — aborting remaining orders (%d placed so far).", success)
-				fail++
 				return orderIDs, submitted, PatternDayTradingError{msg: err.Error()}
 			}
 			if isIntradayMarginError(err) {
@@ -340,6 +335,9 @@ func PlaceBatch(client *api.Client, specs []OrderSpec, cryptoPrices map[string]d
 			orderIDs = append(orderIDs, req.OrderID)
 			submitted = append(submitted, s)
 			success++
+			if todayBuysPath != "" && s.Side == "BUY" && s.InstrumentType == "EQUITY" {
+				RecordTodayBuys(todayBuysPath, map[string]bool{s.Symbol: true})
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -355,8 +353,8 @@ func buildOrderRequest(s OrderSpec, cryptoPrices map[string]decimal.Decimal) (ap
 			Symbol: s.Symbol,
 			Type:   s.InstrumentType,
 		},
-		OrderSide: s.Side,
-		OrderType: "MARKET",
+		OrderSide:  s.Side,
+		OrderType:  "MARKET",
 		Expiration: api.OrderExpiration{TimeInForce: "DAY"},
 	}
 
@@ -404,25 +402,36 @@ func must2(f float64, _ bool) float64 { return f }
 // Cancel open orders
 // ─────────────────────────────────────────────────────────────────────────────
 
-func CancelOpenOrders(client *api.Client, orders []api.Order, dryRun bool) {
+func CancelOpenOrders(client *api.Client, orders []api.Order, dryRun bool) error {
 	open := filterActive(orders)
 	if len(open) == 0 {
 		log.Printf("INFO     No open orders to cancel.")
-		return
+		return nil
 	}
 	log.Printf("INFO     Cancelling %d open order(s) before rebalancing…", len(open))
 	if dryRun {
 		log.Printf("INFO     DRY RUN — would cancel %d open order(s).", len(open))
-		return
+		return nil
 	}
+	var ids []string
+	failed := 0
 	for _, o := range open {
 		if err := client.CancelOrder(o.OrderID); err != nil {
 			log.Printf("WARNING    ✗ Could not cancel %s (ID: %.8s): %v", o.Instrument.Symbol, o.OrderID, err)
+			failed++
 		} else {
 			log.Printf("INFO       ✓ Cancelled %s %s (ID: %.8s)", o.Side, o.Instrument.Symbol, o.OrderID)
+			ids = append(ids, o.OrderID)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	if failed > 0 {
+		return fmt.Errorf("could not cancel %d open order(s)", failed)
+	}
+	if !WaitForOrdersToClear(client, ids, "cancel", SellWaitTimeoutSecs) {
+		return fmt.Errorf("cancelled orders did not clear")
+	}
+	return nil
 }
 
 func filterActive(orders []api.Order) []api.Order {
@@ -439,49 +448,39 @@ func filterActive(orders []api.Order) []api.Order {
 // Wait for orders to clear
 // ─────────────────────────────────────────────────────────────────────────────
 
-func WaitForOrdersToClear(client *api.Client, orderIDs []string, label string, timeoutSecs int) bool {
+// portfolioGetter is satisfied by *api.Client and test fakes.
+type portfolioGetter interface {
+	GetPortfolio() (*api.Portfolio, error)
+}
+
+func WaitForOrdersToClear(client portfolioGetter, orderIDs []string, label string, timeoutSecs int) bool {
 	if len(orderIDs) == 0 {
 		return true
 	}
-	pending := map[string]bool{}
-	for _, id := range orderIDs {
-		pending[id] = true
-	}
 	deadline := time.Now().Add(time.Duration(timeoutSecs) * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		p, err := client.GetPortfolio()
 		if err != nil {
 			log.Printf("WARNING  Could not refresh portfolio while waiting for %s orders: %v", label, err)
-			time.Sleep(time.Duration(OrderPollSecs) * time.Second)
-			continue
-		}
-		for _, o := range p.Orders {
-			if api.ActiveOrderStatuses[o.Status] {
-				delete(pending, o.OrderID)
+		} else {
+			active := 0
+			for _, o := range p.Orders {
+				if api.ActiveOrderStatuses[o.Status] {
+					active++
+				}
 			}
-		}
-		// pending = intersection(pending, active)
-		newPending := map[string]bool{}
-		active := map[string]bool{}
-		for _, o := range p.Orders {
-			if api.ActiveOrderStatuses[o.Status] {
-				active[o.OrderID] = true
+			if active == 0 {
+				log.Printf("INFO     All %s orders are no longer active.", label)
+				return true
 			}
+			log.Printf("INFO     Waiting for %d active %s order(s) to clear…", active, label)
 		}
-		for id := range pending {
-			if active[id] {
-				newPending[id] = true
-			}
+		if !time.Now().Before(deadline) {
+			break
 		}
-		pending = newPending
-		if len(pending) == 0 {
-			log.Printf("INFO     All %s orders are no longer active.", label)
-			return true
-		}
-		log.Printf("INFO     Waiting for %d %s order(s) to clear…", len(pending), label)
 		time.Sleep(time.Duration(OrderPollSecs) * time.Second)
 	}
-	log.Printf("WARNING  Timed out waiting for %d %s order(s) to clear.", len(pending), label)
+	log.Printf("WARNING  Timed out waiting for %s order(s) to clear.", label)
 	return false
 }
 
@@ -573,6 +572,14 @@ type todayBuysFile struct {
 	Symbols []string `json:"symbols"`
 }
 
+func sessionDate(now time.Time) string {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return now.UTC().Format("2006-01-02")
+	}
+	return now.In(loc).Format("2006-01-02")
+}
+
 func LoadTodayBuys(path string) map[string]bool {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -580,9 +587,10 @@ func LoadTodayBuys(path string) map[string]bool {
 	}
 	var f todayBuysFile
 	if err := json.Unmarshal(b, &f); err != nil {
+		log.Printf("WARNING  Day-trade ledger unreadable (%v) — treating as empty.", err)
 		return map[string]bool{}
 	}
-	today := time.Now().Format("2006-01-02")
+	today := sessionDate(time.Now())
 	if f.Date != today {
 		return map[string]bool{}
 	}
@@ -607,11 +615,18 @@ func RecordTodayBuys(path string, symbols map[string]bool) {
 	}
 	sort.Strings(out)
 	f := todayBuysFile{
-		Date:    time.Now().Format("2006-01-02"),
+		Date:    sessionDate(time.Now()),
 		Symbols: out,
 	}
-	b, _ := json.Marshal(f)
-	_ = os.WriteFile(path, b, 0o644)
+	b, err := json.Marshal(f)
+	if err != nil {
+		log.Printf("WARNING  Could not encode day-trade ledger: %v", err)
+		return
+	}
+	if err := config.WriteFileAtomic(path, b, 0o600); err != nil {
+		log.Printf("WARNING  Could not write day-trade ledger: %v", err)
+		return
+	}
 	log.Printf("INFO     Day-trade ledger updated: %d symbol(s) bought today total.", len(existing))
 }
 
@@ -646,10 +661,10 @@ func LogDryRunOrders(specs []OrderSpec) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newUUID() string {
-	// Simple UUID v4 via crypto/rand
-	b := make([]byte, 16)
-	_, _ = randRead(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
+	id, err := api.NewOrderID()
+	if err != nil {
+		log.Printf("WARNING  crypto/rand failed for order id: %v", err)
+		return fmt.Sprintf("pt-%d", time.Now().UnixNano())
+	}
+	return id
 }

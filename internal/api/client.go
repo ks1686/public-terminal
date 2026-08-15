@@ -48,7 +48,7 @@ func resolveBin() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("public CLI not found; install from https://github.com/anomalyco/publicdotcom-cli")
+	return "", fmt.Errorf("public CLI not found; install from https://github.com/PublicDotCom/publicdotcom-cli")
 }
 
 func homeDir() string {

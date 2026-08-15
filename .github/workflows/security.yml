@@ -37,9 +37,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google/osv-scanner-action/osv-scanner-action@v2.3.4
+      - uses: actions/setup-go@v5
         with:
-          scan-args: |-
-            --lockfile=go.mod
-            --recursive
-            ./
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: osv-scanner
+        run: go run github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.0 --lockfile=go.mod .

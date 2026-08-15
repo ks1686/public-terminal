@@ -26,6 +26,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
 
       - run: go vet ./...
 
@@ -46,6 +47,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
 
       - run: go build ./...
 
@@ -67,6 +69,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
 
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

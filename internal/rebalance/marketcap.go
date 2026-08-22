@@ -204,12 +204,94 @@ func FetchMarketCaps(tickers []string, index, cachePath string) (map[string]floa
 	return caps, nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Yahoo Finance v7 quote API
+// ─────────────────────────────────────────────────────────────────────────────
+
+var (
+	yahooMu      sync.Mutex
+	yahooCrumb   string
+	yahooCookies []*http.Cookie
+)
+
+// Overridable for tests.
+var (
+	yahooCookieURL = "https://fc.yahoo.com"
+	yahooCrumbURL  = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+	yahooQuoteURL  = "https://query1.finance.yahoo.com/v7/finance/quote"
+)
+
+// yahooSession returns a cached cookie + crumb pair for the Yahoo v7 quote API.
+// Since 2025 the endpoint answers 401 Unauthorized without them; the crumb is
+// minted from the cookie jar obtained via fc.yahoo.com. On any auth rejection
+// resetYahooSession() drops the cache so the next batch re-authenticates.
+func yahooSession(ctx context.Context) (string, []*http.Cookie, error) {
+	yahooMu.Lock()
+	defer yahooMu.Unlock()
+	if yahooCrumb != "" {
+		return yahooCrumb, yahooCookies, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", yahooCookieURL, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("Yahoo session cookie fetch: %w", err)
+	}
+	cookies := resp.Cookies()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+
+	crumbReq, err := http.NewRequestWithContext(ctx, "GET", yahooCrumbURL, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	crumbReq.Header.Set("User-Agent", userAgent)
+	for _, c := range cookies {
+		crumbReq.AddCookie(c)
+	}
+	crumbResp, err := httpClient.Do(crumbReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("Yahoo crumb fetch: %w", err)
+	}
+	crumbBytes, readErr := io.ReadAll(io.LimitReader(crumbResp.Body, 128))
+	crumbResp.Body.Close()
+	if readErr != nil {
+		return "", nil, fmt.Errorf("reading Yahoo crumb: %w", readErr)
+	}
+	crumb := strings.TrimSpace(string(crumbBytes))
+	if crumb == "" || strings.ContainsAny(crumb, "<>") {
+		return "", nil, fmt.Errorf("Yahoo returned an empty or invalid crumb")
+	}
+
+	yahooCrumb = crumb
+	yahooCookies = cookies
+	return crumb, cookies, nil
+}
+
+// resetYahooSession drops the cached crumb so the next batch re-authenticates.
+func resetYahooSession() {
+	yahooMu.Lock()
+	yahooCrumb = ""
+	yahooCookies = nil
+	yahooMu.Unlock()
+}
+
 // fetchYahooBatchMarketCaps calls the Yahoo Finance v7 quote API for a batch of symbols.
 func fetchYahooBatchMarketCaps(ctx context.Context, yfSymbols []string) (map[string]float64, error) {
+	crumb, cookies, err := yahooSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	params := url.Values{}
 	params.Set("symbols", strings.Join(yfSymbols, ","))
 	params.Set("fields", "marketCap")
-	reqURL := "https://query1.finance.yahoo.com/v7/finance/quote?" + params.Encode()
+	params.Set("crumb", crumb)
+	reqURL := yahooQuoteURL + "?" + params.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
@@ -217,6 +299,9 @@ func fetchYahooBatchMarketCaps(ctx context.Context, yfSymbols []string) (map[str
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -226,6 +311,13 @@ func fetchYahooBatchMarketCaps(ctx context.Context, yfSymbols []string) (map[str
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		resetYahooSession()
+		return nil, fmt.Errorf("Yahoo Finance rejected the session (HTTP %d)", resp.StatusCode)
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("Yahoo Finance HTTP %d for quote batch", resp.StatusCode)
 	}
 
 	var data struct {

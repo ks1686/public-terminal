@@ -558,45 +558,45 @@ func Run(accountID string, dryRun bool) error {
 	if len(buys) > 0 {
 		// Re-fetch post-sell portfolio
 		postSnap, err := GetPortfolioSnapshot(client)
-		postEffectiveBP := margin.EffectiveBP
-		if err == nil {
-			postMargin := EstimateMarginState(postSnap, marginUsagePct)
-			postEffectiveBP = postMargin.EffectiveBP
-			log.Printf("INFO       Post-sell effective BP: $%.2f", must2(postEffectiveBP.Float64()))
+		if err != nil {
+			return fmt.Errorf("post-sell portfolio re-fetch failed — aborting buy phase to avoid sizing orders off stale buying power: %w", err)
+		}
+		postMargin := EstimateMarginState(postSnap, marginUsagePct)
+		postEffectiveBP := postMargin.EffectiveBP
+		log.Printf("INFO       Post-sell effective BP: $%.2f", must2(postEffectiveBP.Float64()))
 
-			// Supplemental sells for shortfall
-			totalBuyNeed := decimal.Zero
-			for _, b := range buys {
-				totalBuyNeed = totalBuyNeed.Add(b.DollarAmount)
+		// Supplemental sells for shortfall
+		totalBuyNeed := decimal.Zero
+		for _, b := range buys {
+			totalBuyNeed = totalBuyNeed.Add(b.DollarAmount)
+		}
+		shortfall := decimal.Max(decimal.Zero, totalBuyNeed.Sub(postEffectiveBP))
+		if shortfall.IsPositive() {
+			log.Printf("INFO       Buy shortfall $%.2f — generating supplemental sells.", must2(shortfall.Float64()))
+			alreadySelling := map[string]bool{}
+			for _, s := range sells {
+				alreadySelling[s.Symbol] = true
 			}
-			shortfall := decimal.Max(decimal.Zero, totalBuyNeed.Sub(postEffectiveBP))
-			if shortfall.IsPositive() {
-				log.Printf("INFO       Buy shortfall $%.2f — generating supplemental sells.", must2(shortfall.Float64()))
-				alreadySelling := map[string]bool{}
-				for _, s := range sells {
-					alreadySelling[s.Symbol] = true
+			alreadyBuying := map[string]bool{}
+			for _, b := range buys {
+				alreadyBuying[b.Symbol] = true
+			}
+			supplemental := ComputeSupplementalSells(shortfall, postSnap.EquityPos, alreadySelling, alreadyBuying, todayBuys, stockWeights, allocStocks, margin.InvestmentBase)
+			if len(supplemental) > 0 {
+				supplemental = FilterByTradability(client, supplemental)
+			}
+			if len(supplemental) > 0 {
+				log.Printf("INFO     --- Placing supplemental SELL orders (%d) ---", len(supplemental))
+				suppIDs, _, suppErr := PlaceBatch(client, supplemental, cryptoPrices, false, todayBuysPath)
+				if suppErr != nil {
+					return fmt.Errorf("supplemental sells: %w", suppErr)
 				}
-				alreadyBuying := map[string]bool{}
-				for _, b := range buys {
-					alreadyBuying[b.Symbol] = true
+				if !WaitForOrdersToClear(client, suppIDs, "supplemental sell", SellWaitTimeoutSecs) {
+					return fmt.Errorf("supplemental sells did not clear")
 				}
-				supplemental := ComputeSupplementalSells(shortfall, postSnap.EquityPos, alreadySelling, alreadyBuying, todayBuys, stockWeights, allocStocks, margin.InvestmentBase)
-				if len(supplemental) > 0 {
-					supplemental = FilterByTradability(client, supplemental)
-				}
-				if len(supplemental) > 0 {
-					log.Printf("INFO     --- Placing supplemental SELL orders (%d) ---", len(supplemental))
-					suppIDs, _, suppErr := PlaceBatch(client, supplemental, cryptoPrices, false, todayBuysPath)
-					if suppErr != nil {
-						return fmt.Errorf("supplemental sells: %w", suppErr)
-					}
-					if !WaitForOrdersToClear(client, suppIDs, "supplemental sell", SellWaitTimeoutSecs) {
-						return fmt.Errorf("supplemental sells did not clear")
-					}
-					// Refresh BP again
-					if snap2, err2 := GetPortfolioSnapshot(client); err2 == nil {
-						postEffectiveBP = EstimateMarginState(snap2, marginUsagePct).EffectiveBP
-					}
+				// Refresh BP again
+				if snap2, err2 := GetPortfolioSnapshot(client); err2 == nil {
+					postEffectiveBP = EstimateMarginState(snap2, marginUsagePct).EffectiveBP
 				}
 			}
 		}

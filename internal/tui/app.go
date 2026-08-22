@@ -56,6 +56,9 @@ type rebalancerStatusMsg struct {
 
 type paneID int
 
+// confirmRebalanceWindow is how long the armed "press R again" confirmation
+// stays valid before it disarms itself.
+const confirmRebalanceWindow = 15 * time.Second
 const (
 	paneStocks paneID = iota
 	paneCrypto
@@ -94,11 +97,12 @@ type Model struct {
 	skipPending       bool
 	activePane        paneID
 
-	status           string
-	statusIsErr      bool
-	portGen          int
-	showHelp         bool
-	confirmRebalance bool
+	status             string
+	statusIsErr        bool
+	portGen            int
+	showHelp           bool
+	confirmRebalance   bool
+	confirmRebalanceAt time.Time
 }
 
 func NewModel(accounts []string, activeIdx int) *Model {
@@ -592,7 +596,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if !m.confirmRebalance {
 			m.confirmRebalance = true
+			m.confirmRebalanceAt = time.Now()
 			m.status = "Press R again to place live rebalance orders."
+			m.statusIsErr = false
+			return m, nil
+		}
+		// The armed confirmation expires: a second R pressed long after the
+		// first must not fire live orders without a fresh deliberate press.
+		if time.Since(m.confirmRebalanceAt) > confirmRebalanceWindow {
+			m.confirmRebalance = false
+			m.status = "Rebalance confirmation expired — press R again to confirm."
 			m.statusIsErr = false
 			return m, nil
 		}

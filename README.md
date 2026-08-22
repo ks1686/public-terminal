@@ -222,8 +222,8 @@ A daily buy ledger records every equity symbol purchased in any run today. Subse
 | `SP500` | S&P 500 |
 | `NASDAQ100` | NASDAQ-100 |
 | `DJIA` | Dow Jones Industrial Average |
-| `FTSE_GLOBAL_ALL_CAP` | Global equities via iShares ACWI |
-| `SPUS` | S&P 500 Shariah Industry Exclusions |
+| `FTSE_GLOBAL_ALL_CAP` | Global equities (sourced from SSGA SPGM, MSCI ACWI IMI) |
+| `SPUS` | S&P 500 Shariah (SP Funds S&P 500 Shariah Industry Exclusions ETF) |
 
 ---
 
@@ -276,6 +276,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.public-terminal.reba
     cache/rebalance.log             — rebalancer run history
     cache/market_caps.json          — market cap cache (auto-refreshes)
     cache/portfolio_cache.json      — cached portfolio for instant startup
+    cache/constituents_<index>.json — cached index constituent lists
     cache/today_buys.json           — PDT protection ledger (resets daily)
     cache/skip_next_rebalance       — sentinel file — presence skips one run
 ```
